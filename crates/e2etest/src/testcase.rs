@@ -157,6 +157,11 @@ where
         self
     }
 
+    /// Add a sub-module registration function to the test case.
+    pub fn with_module(self, register: impl FnOnce(Self) -> Self) -> Self {
+        register(self)
+    }
+
     #[framed]
     /// Run initialization, all tests, and cleanup functions in the test case.
     async fn run(
