@@ -15,6 +15,8 @@ use std::future;
 use std::panic;
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::time;
 use tracing::Instrument;
@@ -22,6 +24,21 @@ use tracing::Span;
 use tracing::error;
 use tracing::error_span;
 use tracing::info;
+use tracing::warn;
+
+tokio::task_local! {
+    static XFAIL: Arc<AtomicBool>;
+}
+
+/// Mark the current test as expected to fail from this point on.
+pub fn xfail() {
+    if XFAIL
+        .try_with(|f| f.store(true, Ordering::Relaxed))
+        .is_err()
+    {
+        error!("xfail() called outside of a test run - ignoring");
+    }
+}
 
 type TestFuture = BoxFuture<'static, ()>;
 
@@ -30,11 +47,16 @@ type TestFn<F> = Box<dyn Fn(F) -> TestFuture>;
 #[derive(Debug, Default)]
 pub(crate) struct RunReport {
     failed_tests: Vec<String>,
+    xpassed_tests: Vec<String>,
 }
 
 impl RunReport {
     pub(crate) fn failed_tests_summary(&self) -> Option<String> {
-        format_failed_tests(&self.failed_tests)
+        format_test_list("Failed tests:", &self.failed_tests)
+    }
+
+    pub(crate) fn xpassed_tests_summary(&self) -> Option<String> {
+        format_test_list("Xpassed tests:", &self.xpassed_tests)
     }
 
     pub(crate) fn is_success(&self) -> bool {
@@ -46,21 +68,22 @@ impl From<Statistics> for RunReport {
     fn from(stats: Statistics) -> Self {
         Self {
             failed_tests: stats.failed_tests,
+            xpassed_tests: stats.xpassed_tests,
         }
     }
 }
 
-pub(crate) fn format_failed_tests(failed_tests: &[String]) -> Option<String> {
-    if failed_tests.is_empty() {
+fn format_test_list(header: &str, tests: &[String]) -> Option<String> {
+    if tests.is_empty() {
         return None;
     }
 
-    let failed_tests = failed_tests
+    let items = tests
         .iter()
-        .map(|failed_test| format!("- {failed_test}"))
+        .map(|t| format!("- {t}"))
         .collect::<Vec<_>>()
         .join("\n");
-    Some(format!("Failed tests:\n{failed_tests}"))
+    Some(format!("{header}\n{items}"))
 }
 
 #[derive(Debug)]
@@ -71,6 +94,9 @@ pub(crate) struct Statistics {
     ok: usize,
     failed: usize,
     failed_tests: Vec<String>,
+    xfailed: usize,
+    xpassed: usize,
+    xpassed_tests: Vec<String>,
 }
 
 impl Statistics {
@@ -81,6 +107,9 @@ impl Statistics {
             ok: 0,
             failed: 0,
             failed_tests: vec![],
+            xfailed: 0,
+            xpassed: 0,
+            xpassed_tests: vec![],
         }
     }
 
@@ -90,11 +119,24 @@ impl Statistics {
         self.ok += other.ok;
         self.failed += other.failed;
         self.failed_tests.extend(other.failed_tests.iter().cloned());
+        self.xfailed += other.xfailed;
+        self.xpassed += other.xpassed;
+        self.xpassed_tests
+            .extend(other.xpassed_tests.iter().cloned());
     }
 
     fn record_failure(&mut self, failed_test: impl Into<String>) {
         self.failed += 1;
         self.failed_tests.push(failed_test.into());
+    }
+
+    fn record_xfailed(&mut self) {
+        self.xfailed += 1;
+    }
+
+    fn record_xpassed(&mut self, name: impl Into<String>) {
+        self.xpassed += 1;
+        self.xpassed_tests.push(name.into());
     }
 }
 
@@ -177,7 +219,7 @@ where
 
         if let Some((timeout, init)) = &self.init {
             stats.launched += 1;
-            if !run_single(
+            match run_single(
                 error_span!("init"),
                 *timeout,
                 init(fixture.clone()),
@@ -185,10 +227,17 @@ where
             )
             .await
             {
-                stats.record_failure(format!("{test_case_name}::init"));
-                return stats;
+                TestOutcome::Ok => stats.ok += 1,
+                TestOutcome::Failed => {
+                    stats.record_failure(format!("{test_case_name}::init"));
+                    return stats;
+                }
+                TestOutcome::Xfailed => {
+                    stats.record_xfailed();
+                    return stats;
+                }
+                TestOutcome::Xpassed => stats.record_xpassed(format!("{test_case_name}::init")),
             }
-            stats.ok += 1;
         }
 
         stream::iter(self.tests.iter())
@@ -199,18 +248,25 @@ where
                 let actors = fixture.clone();
                 let backtrace = backtrace.clone();
                 async move {
-                    let ok =
+                    let outcome =
                         run_single(error_span!("test", name), *timeout, test(actors), backtrace)
                             .await;
-                    (name, ok)
+                    (name, outcome)
                 }
             })
-            .for_each(|(name, ok)| {
+            .for_each(|(name, outcome)| {
                 stats.launched += 1;
-                if ok {
-                    stats.ok += 1;
-                } else {
-                    stats.record_failure(format!("{test_case_name}::{name}"));
+                match outcome {
+                    TestOutcome::Ok => stats.ok += 1,
+                    TestOutcome::Failed => {
+                        stats.record_failure(format!("{test_case_name}::{name}"));
+                    }
+                    TestOutcome::Xfailed => {
+                        stats.record_xfailed();
+                    }
+                    TestOutcome::Xpassed => {
+                        stats.record_xpassed(format!("{test_case_name}::{name}"));
+                    }
                 }
                 future::ready(())
             })
@@ -218,7 +274,7 @@ where
 
         if let Some((timeout, cleanup)) = &self.cleanup {
             stats.launched += 1;
-            if !run_single(
+            match run_single(
                 error_span!("cleanup"),
                 *timeout,
                 cleanup(fixture.clone()),
@@ -226,9 +282,16 @@ where
             )
             .await
             {
-                stats.record_failure(format!("{test_case_name}::cleanup"));
-            } else {
-                stats.ok += 1;
+                TestOutcome::Ok => stats.ok += 1,
+                TestOutcome::Failed => {
+                    stats.record_failure(format!("{test_case_name}::cleanup"));
+                }
+                TestOutcome::Xfailed => {
+                    stats.record_xfailed();
+                }
+                TestOutcome::Xpassed => {
+                    stats.record_xpassed(format!("{test_case_name}::cleanup"));
+                }
             }
         }
 
@@ -249,6 +312,15 @@ where
     })
 }
 
+/// Outcome of a single test execution.
+#[derive(Debug)]
+enum TestOutcome {
+    Ok,
+    Failed,
+    Xfailed,
+    Xpassed,
+}
+
 #[framed]
 /// Runs a single test with a timeout, logging the result in the provided span.
 async fn run_single(
@@ -256,22 +328,39 @@ async fn run_single(
     timeout: Duration,
     future: TestFuture,
     backtrace: Backtrace,
-) -> bool {
+) -> TestOutcome {
+    let xfail_flag = Arc::new(AtomicBool::new(false));
+    let xfail_flag_clone = xfail_flag.clone();
     let task = tokio::spawn(frame!(
-        async move {
-            time::timeout(timeout, future)
-                .await
-                .expect("test timed out");
-        }
-        .instrument(span.clone())
+        XFAIL
+            .scope(xfail_flag_clone, async move {
+                time::timeout(timeout, future)
+                    .await
+                    .expect("test timed out");
+            })
+            .instrument(span.clone())
     ));
-    if let Err(err) = task.await {
-        let backtrace = backtrace.get();
-        error!(parent: &span, "test failed: {err}\n{backtrace}");
-        false
-    } else {
-        info!(parent: &span, "test ok");
-        true
+    let xfail_set = || xfail_flag.load(Ordering::Relaxed);
+    match task.await {
+        Ok(()) => {
+            if xfail_set() {
+                warn!(parent: &span, "test xpassed (expected failure, but passed)");
+                TestOutcome::Xpassed
+            } else {
+                info!(parent: &span, "test ok");
+                TestOutcome::Ok
+            }
+        }
+        Err(err) => {
+            if xfail_set() {
+                info!(parent: &span, "test xfailed (expected): {err}");
+                TestOutcome::Xfailed
+            } else {
+                let backtrace = backtrace.get();
+                error!(parent: &span, "test failed: {err}\n{backtrace}");
+                TestOutcome::Failed
+            }
+        }
     }
 }
 
@@ -371,7 +460,7 @@ mod tests {
         let failed_tests = vec!["crud::boom".to_string(), "crud::cleanup".to_string()];
 
         assert_eq!(
-            format_failed_tests(&failed_tests).as_deref(),
+            format_test_list("Failed tests:", &failed_tests).as_deref(),
             Some("Failed tests:\n- crud::boom\n- crud::cleanup")
         );
     }
@@ -397,5 +486,93 @@ mod tests {
             stats.failed_tests,
             &["crud::boom".to_string(), "crud::cleanup".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn xfail_only_applies_after_call() {
+        let timeout = Duration::from_secs(1);
+        let test_case = TestCase::empty()
+            .with_test("panics_without_xfail", timeout, |_| async {
+                panic!("real bug");
+                #[allow(unreachable_code)]
+                xfail(); // too late - never reached
+            })
+            .with_test("panics_after_xfail", timeout, |_| async {
+                xfail();
+                panic!("known bug");
+            });
+
+        let stats = test_case
+            .run((), "suite", &HashSet::new(), Backtrace::new())
+            .await;
+
+        assert_eq!(stats.failed, 1);
+        assert_eq!(stats.xfailed, 1);
+        assert_eq!(stats.ok, 0);
+        assert_eq!(stats.xpassed, 0);
+    }
+
+    #[tokio::test]
+    async fn xfail_test_that_passes_is_xpassed() {
+        let timeout = Duration::from_secs(1);
+        let test_case = TestCase::empty().with_test("surprise", timeout, |_| async {
+            xfail();
+            // does not panic - unexpected success
+        });
+
+        let stats = test_case
+            .run((), "suite", &HashSet::new(), Backtrace::new())
+            .await;
+
+        assert_eq!(stats.ok, 0);
+        assert_eq!(stats.failed, 0);
+        assert_eq!(stats.xfailed, 0);
+        assert_eq!(stats.xpassed, 1);
+        assert_eq!(stats.xpassed_tests, &["suite::surprise".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn xfailed_init_aborts_test_case() {
+        let timeout = Duration::from_secs(1);
+        let test_case = TestCase::empty()
+            .with_init(timeout, |_| async {
+                xfail();
+                panic!("known init bug");
+            })
+            .with_test("should_not_run", timeout, |_| async {
+                panic!("tests must not run after xfailed init");
+            })
+            .with_cleanup(timeout, |_| async {
+                panic!("cleanup must not run after xfailed init");
+            });
+
+        let stats = test_case
+            .run((), "suite", &HashSet::new(), Backtrace::new())
+            .await;
+
+        assert_eq!(stats.xfailed, 1);
+        assert_eq!(stats.ok, 0);
+        assert_eq!(stats.failed, 0);
+        assert_eq!(stats.xpassed, 0);
+    }
+
+    #[tokio::test]
+    async fn xpassed_init_continues_test_case() {
+        let timeout = Duration::from_secs(1);
+        let test_case = TestCase::empty()
+            .with_init(timeout, |_| async {
+                xfail();
+                // does not panic - unexpected success
+            })
+            .with_test("should_run", timeout, |_| async {});
+
+        let stats = test_case
+            .run((), "suite", &HashSet::new(), Backtrace::new())
+            .await;
+
+        assert_eq!(stats.xpassed, 1);
+        assert_eq!(stats.ok, 1);
+        assert_eq!(stats.failed, 0);
+        assert_eq!(stats.xfailed, 0);
     }
 }

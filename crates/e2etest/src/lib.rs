@@ -17,6 +17,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 pub use testcase::TestCase;
+pub use testcase::xfail;
 use tokio::fs;
 use tokio::runtime::Builder;
 use tokio::runtime::Handle;
@@ -24,6 +25,7 @@ use tokio::task;
 use tokio::time;
 use tracing::error;
 use tracing::info;
+use tracing::warn;
 
 #[derive(Parser)]
 #[clap(version)]
@@ -255,6 +257,10 @@ where
                 error!("Timed out waiting for tasks to finish");
             } else {
                 info!("All tasks finished");
+            }
+
+            if let Some(xpassed_tests) = report.xpassed_tests_summary() {
+                warn!("{xpassed_tests}");
             }
 
             if let Some(failed_tests) = report.failed_tests_summary() {
