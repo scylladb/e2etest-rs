@@ -113,6 +113,7 @@ mod task;
 mod test;
 
 use crate::filter::Filter;
+use crate::filter::Restricted;
 pub use crate::fixture::Fixture;
 use crate::fixture::Fixtures;
 pub use crate::fixture::Setup;
@@ -247,7 +248,7 @@ pub async fn run(config: Config) -> Statistics {
 
     let fixtures = Fixtures::with_permanent(config.permanent_fixtures.into_iter());
     let root = Root;
-    let filter = Filter::new(&config.filters, &root);
+    let filter = Filter::new(&Restricted::None, &config.filters, &root);
 
     run::run(
         fixtures,
