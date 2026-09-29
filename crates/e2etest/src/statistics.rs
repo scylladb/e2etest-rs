@@ -40,6 +40,10 @@ pub(crate) enum Event {
     TestLaunched,
     TestPassed,
     TestFailed,
+
+    ProcessLaunched,
+    ProcessPassed,
+    ProcessFailed,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -52,7 +56,10 @@ impl EventEntry {
     fn is_failed(&self) -> bool {
         matches!(
             self.event,
-            Event::SetupFailed(_) | Event::TestFailed | Event::TeardownFailed
+            Event::SetupFailed(_)
+                | Event::TestFailed
+                | Event::TeardownFailed
+                | Event::ProcessFailed
         )
     }
 }
@@ -79,6 +86,9 @@ impl Debug for Statistics {
             .field("teardowns_launched", &self.teardowns_launched())
             .field("teardowns_passed", &self.teardowns_passed())
             .field("teardowns_failed", &self.teardowns_failed())
+            .field("processes_launched", &self.processes_launched())
+            .field("processes_passed", &self.processes_passed())
+            .field("processes_failed", &self.processes_failed())
             .finish()
     }
 }
@@ -142,6 +152,9 @@ impl Statistics {
                     inner.included.contains(&name),
                     "Test {name} was not included before being processed for event {event:?}"
                 );
+            }
+            Event::ProcessLaunched | Event::ProcessPassed | Event::ProcessFailed => {
+                // processes are not defined or included, so we don't check for them
             }
             _ => {
                 assert!(
@@ -330,6 +343,36 @@ impl Statistics {
             .events
             .iter()
             .filter(|entry| matches!(entry.event, Event::TeardownFailed))
+            .count()
+    }
+
+    /// Returns number of processes that were launched.
+    pub fn processes_launched(&self) -> usize {
+        let inner = self.0.lock().unwrap();
+        inner
+            .events
+            .iter()
+            .filter(|entry| matches!(entry.event, Event::ProcessLaunched))
+            .count()
+    }
+
+    /// Returns number of processes that passed successfully.
+    pub fn processes_passed(&self) -> usize {
+        let inner = self.0.lock().unwrap();
+        inner
+            .events
+            .iter()
+            .filter(|entry| matches!(entry.event, Event::ProcessPassed))
+            .count()
+    }
+
+    /// Returns number of processes that failed.
+    pub fn processes_failed(&self) -> usize {
+        let inner = self.0.lock().unwrap();
+        inner
+            .events
+            .iter()
+            .filter(|entry| matches!(entry.event, Event::ProcessFailed))
             .count()
     }
 
@@ -604,6 +647,9 @@ mod tests {
         stats.record("root2::branch2::test2", Event::TestIncluded);
         stats.record("root2::test3", Event::TestIncluded);
 
+        // Start executing the process unshare-root1
+        stats.record("unshare-root1", Event::ProcessLaunched);
+
         // Start executing the root1 group
         stats.record("root1", Event::SetupLaunched);
         stats.record("root1", Event::SetupPassed);
@@ -654,6 +700,12 @@ mod tests {
         stats.record("root1", Event::TeardownLaunched);
         stats.record("root1", Event::TeardownFailed);
 
+        // Finish ok the process unshare-root1
+        stats.record("unshare-root1", Event::ProcessPassed);
+
+        // Start executing the process unshare-root2
+        stats.record("unshare-root2", Event::ProcessLaunched);
+
         // Start executing the root2 group
         stats.record("root2", Event::SetupLaunched);
         stats.record("root2", Event::SetupPassed);
@@ -682,6 +734,9 @@ mod tests {
         stats.record("root2", Event::TeardownLaunched);
         stats.record("root2", Event::TeardownPassed);
 
+        // Finish failed the process unshare-root2
+        stats.record("unshare-root2", Event::ProcessFailed);
+
         assert_eq!(stats.tests_defined(), 18);
         assert_eq!(stats.tests_included(), 9);
         assert_eq!(stats.tests_launched(), 3);
@@ -698,6 +753,10 @@ mod tests {
         assert_eq!(stats.teardowns_launched(), 11);
         assert_eq!(stats.teardowns_passed(), 10);
         assert_eq!(stats.teardowns_failed(), 1);
+
+        assert_eq!(stats.processes_launched(), 2);
+        assert_eq!(stats.processes_passed(), 1);
+        assert_eq!(stats.processes_failed(), 1);
 
         assert_eq!(
             stats.tests_passed_names(),
@@ -718,7 +777,13 @@ mod tests {
         );
         assert_eq!(
             stats.failed_names(),
-            vec!["root1", "root1::test1", "root2::branch2", "root2::test3"]
+            vec![
+                "root1",
+                "root1::test1",
+                "root2::branch2",
+                "root2::test3",
+                "unshare-root2"
+            ]
         );
     }
 
