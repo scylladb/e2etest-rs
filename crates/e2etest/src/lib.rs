@@ -111,6 +111,7 @@ mod run;
 mod statistics;
 mod task;
 mod test;
+mod unshare;
 
 use crate::filter::Filter;
 use crate::filter::Restricted;
