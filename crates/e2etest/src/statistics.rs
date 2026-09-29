@@ -10,20 +10,21 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Debug;
 use std::iter;
+use std::ops::AddAssign;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 /// Statistics for a test run.
 pub struct Statistics(Arc<Mutex<Inner>>);
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Task {
     Group,
     Test,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Event {
     SetupLaunched,
     SetupSkipped(Task),
@@ -41,7 +42,7 @@ pub(crate) enum Event {
     TestFailed,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct EventEntry {
     name: String,
     event: Event,
@@ -82,6 +83,7 @@ impl Debug for Statistics {
     }
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Inner {
     defined: HashSet<String>,
     included: HashSet<String>,
@@ -404,6 +406,27 @@ impl Statistics {
     }
 }
 
+impl AddAssign for Statistics {
+    fn add_assign(&mut self, mut rhs: Self) {
+        let mut inner = self.0.lock().unwrap();
+        if Arc::ptr_eq(&self.0, &rhs.0) {
+            // Create a new instance of Statistics to avoid deadlock when merging with itself.
+            rhs = Statistics(Arc::new(Mutex::new(inner.clone())));
+        }
+        let rhs_inner = rhs.0.lock().unwrap();
+        inner.defined.extend(rhs_inner.defined.iter().cloned());
+        inner.included.extend(rhs_inner.included.iter().cloned());
+        for (group, tests) in rhs_inner.groups.iter() {
+            inner
+                .groups
+                .entry(group.clone())
+                .or_default()
+                .extend(tests.iter().cloned());
+        }
+        inner.events.extend(rhs_inner.events.iter().cloned());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -697,5 +720,11 @@ mod tests {
             stats.failed_names(),
             vec!["root1", "root1::test1", "root2::branch2", "root2::test3"]
         );
+    }
+
+    #[test]
+    fn add_assign_itself_no_deadlock() {
+        let mut stats = Statistics::new();
+        stats += stats.clone();
     }
 }
