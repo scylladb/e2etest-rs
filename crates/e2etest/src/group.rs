@@ -100,7 +100,7 @@ where
                         .iter()
                         .filter(|test| ctx.filter.consider_test(test.name())),
                 )
-                .for_each_concurrent(Some(ctx.concurrency), |test| async {
+                .for_each_concurrent(Some(ctx.concurrency.get()), |test| async {
                     _ = test.run_test(ctx.clone()).await;
                 })
                 .await;

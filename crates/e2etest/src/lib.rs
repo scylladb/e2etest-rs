@@ -132,6 +132,7 @@ pub use e2etest_macros::test;
 pub use linkme as __linkme;
 use std::any::Any;
 use std::collections::BTreeSet;
+use std::num::NonZeroUsize;
 use std::panic;
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -151,7 +152,7 @@ pub struct Config {
     permanent_fixtures: Vec<Arc<dyn Any + Send + Sync>>,
     filters: Vec<String>,
     default_timeout: Duration,
-    concurrency: usize,
+    concurrency: NonZeroUsize,
 }
 
 impl Default for Config {
@@ -160,7 +161,7 @@ impl Default for Config {
             permanent_fixtures: Vec::new(),
             filters: Vec::new(),
             default_timeout: DEFAULT_TIMEOUT,
-            concurrency: 1,
+            concurrency: NonZeroUsize::new(1).unwrap(),
         }
     }
 }
@@ -192,7 +193,7 @@ impl Config {
 
     /// Set the maximum number of tests to run concurrently.
     pub fn with_concurrency(mut self, concurrency: usize) -> Self {
-        self.concurrency = concurrency;
+        self.concurrency = NonZeroUsize::new(concurrency).unwrap_or(NonZeroUsize::new(1).unwrap());
         self
     }
 }
