@@ -39,10 +39,7 @@ pub trait RunTest: Send + Sync + 'static {
     fn name(&self) -> &str;
 
     /// Run the test with the given fixture and collect statistics.
-    fn run_test(&self, group_name: &str, ctx: RunContext) -> BoxFuture<'_, ()>;
-
-    /// Whether the test can be run concurrently with other tests.
-    fn can_run_concurrently(&self) -> bool;
+    fn run_test(&self, ctx: RunContext) -> BoxFuture<'_, ()>;
 }
 
 impl<F, T> RunTest for T
@@ -55,18 +52,13 @@ where
         self.name()
     }
 
-    fn can_run_concurrently(&self) -> bool {
-        F::test_can_run_concurrently()
-    }
-
     #[framed]
-    fn run_test(&self, group_name: &str, ctx: RunContext) -> BoxFuture<'_, ()> {
-        let name = format!("{group_name}::{name}", name = self.name());
+    fn run_test(&self, ctx: RunContext) -> BoxFuture<'_, ()> {
         Box::pin(
             async move {
                 // Setup the fixture. If it fails, we skip the test and teardown.
                 let fixture = task::setup(
-                    &name,
+                    self.name(),
                     Task::Test,
                     ctx.fixtures.setup::<F>(),
                     F::timeout_setup().unwrap_or(ctx.default_timeout),
@@ -78,7 +70,7 @@ where
                     Ok(None) | Err(()) => {
                         // Setup could have created other fixtures, so we need to teardown those
                         task::teardown(
-                            &name,
+                            self.name(),
                             ctx.fixtures.teardown(),
                             F::timeout_teardown().unwrap_or(ctx.default_timeout),
                             ctx.clone(),
@@ -89,7 +81,7 @@ where
                 };
 
                 task::test(
-                    &name,
+                    self.name(),
                     self.run(fixture.clone()),
                     self.timeout().unwrap_or(ctx.default_timeout),
                     ctx.clone(),
@@ -101,7 +93,7 @@ where
 
                 // Run the teardown
                 task::teardown(
-                    &name,
+                    self.name(),
                     ctx.fixtures.teardown(),
                     F::timeout_teardown().unwrap_or(ctx.default_timeout),
                     ctx.clone(),

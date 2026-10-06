@@ -24,20 +24,18 @@ impl e2etest::Fixture for Fixture {
     async fn teardown(self) {}
 }
 
-e2etest::group!(name = timeout_root, fixtures = ());
-
-#[e2etest::test(group = timeout_root)]
+#[e2etest::test()]
 async fn first(fixture: Arc<Fixture>) {
     fixture.0.0.fetch_add(1, Ordering::Relaxed);
 }
 
-#[e2etest::test(group = timeout_root, timeout = Duration::from_millis(1000))]
+#[e2etest::test(timeout = Duration::from_millis(1000))]
 async fn second(fixture: Arc<Fixture>) {
     time::sleep(Duration::from_millis(100)).await;
     fixture.0.0.fetch_add(1, Ordering::Relaxed);
 }
 
-#[e2etest::test(group = timeout_root, timeout = Duration::from_millis(10))]
+#[e2etest::test(timeout = Duration::from_millis(10))]
 async fn timeouted(fixture: Arc<Fixture>) {
     time::sleep(Duration::from_millis(100)).await;
     fixture.0.0.fetch_add(1, Ordering::Relaxed);
@@ -51,7 +49,6 @@ async fn timeout() {
         Config::default()
             .with_permanent_fixture(Counter(Arc::clone(&counter)))
             .with_default_timeout(Duration::from_secs(10)),
-        timeout_root(),
     )
     .await;
 
@@ -63,8 +60,5 @@ async fn timeout() {
     assert_eq!(stats.tests_launched(), 3);
     assert_eq!(stats.tests_passed(), 2);
     assert_eq!(stats.tests_failed(), 1);
-    assert_eq!(
-        stats.failed_names(),
-        vec!["timeout_root::timeouted".to_string()]
-    );
+    assert_eq!(stats.failed_names(), vec!["timeout::timeouted".to_string()]);
 }

@@ -461,7 +461,6 @@ version = "0.2.0"
 dependencies = [
  "convert_case",
  "itertools",
- "linkme",
  "proc-macro2",
  "quote",
  "syn 3.0.6",

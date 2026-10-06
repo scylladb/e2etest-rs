@@ -24,21 +24,19 @@ impl e2etest::Fixture for Fixture {
     async fn teardown(self) {}
 }
 
-e2etest::group!(name = skip_root);
+e2etest::group!(name = skip_group, fixtures = (Skip));
 
-e2etest::group!(name = skip_group, parent = skip_root, fixtures = (Skip));
-
-#[e2etest::test(group = skip_root)]
+#[e2etest::test()]
 async fn first(fixture: Arc<Fixture>) {
     fixture.0.0.fetch_add(1, Ordering::Relaxed);
 }
 
-#[e2etest::test(group = skip_root)]
+#[e2etest::test()]
 async fn second(fixture: Arc<Fixture>) {
     fixture.0.0.fetch_add(1, Ordering::Relaxed);
 }
 
-#[e2etest::test(group = skip_root)]
+#[e2etest::test()]
 async fn skipped(fixture: Arc<Fixture>, _: Arc<Skip>) {
     fixture.0.0.fetch_add(1, Ordering::Relaxed);
 }
@@ -56,7 +54,6 @@ async fn skip() {
         Config::default()
             .with_permanent_fixture(Counter(Arc::clone(&counter)))
             .with_default_timeout(Duration::from_secs(1)),
-        skip_root(),
     )
     .await;
 

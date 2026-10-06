@@ -15,8 +15,8 @@ async-backtrace.workspace = true
 e2etest-macros.workspace = true
 futures.workspace = true
 itertools.workspace = true
+linkme.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-linkme.workspace = true

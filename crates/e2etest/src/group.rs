@@ -31,11 +31,6 @@ pub trait Group {
     fn tests(&self) -> &[Box<dyn RunTest>] {
         &[]
     }
-
-    /// The subgroups in this group.
-    fn groups(&self) -> &[Box<dyn RunGroup>] {
-        &[]
-    }
 }
 
 /// A supporting trait to collecting Group trait objects and running them.
@@ -45,11 +40,14 @@ pub trait RunGroup: Send + Sync + 'static {
     /// The name of the group.
     fn name(&self) -> &str;
 
-    /// The names of all tests in this group and its subgroups.
-    fn test_names(&self) -> Vec<String>;
+    /// Returns true if the group has no tests or subgroups.
+    fn is_empty(&self) -> bool;
+
+    /// The names of all tests in this group.
+    fn test_names(&self) -> Box<dyn Iterator<Item = &str> + '_>;
 
     /// Run the group and return statistics about the run.
-    fn run_group(&self, parent_names: Vec<String>, ctx: RunContext) -> BoxFuture<'_, ()>;
+    fn run_group(&self, ctx: RunContext) -> BoxFuture<'_, ()>;
 }
 
 impl<F, G> RunGroup for G
@@ -62,29 +60,21 @@ where
         self.name()
     }
 
-    fn test_names(&self) -> Vec<String> {
-        self.groups()
-            .iter()
-            .flat_map(|group| {
-                group
-                    .test_names()
-                    .into_iter()
-                    .map(|test| format!("{group}::{test}", group = group.name()))
-            })
-            .chain(self.tests().iter().map(|test| test.name().into()))
-            .collect()
+    fn is_empty(&self) -> bool {
+        self.tests().is_empty()
+    }
+
+    fn test_names(&self) -> Box<dyn Iterator<Item = &str> + '_> {
+        Box::new(self.tests().iter().map(|test| test.name()))
     }
 
     #[framed]
-    fn run_group(&self, mut parent_names: Vec<String>, mut ctx: RunContext) -> BoxFuture<'_, ()> {
+    fn run_group(&self, ctx: RunContext) -> BoxFuture<'_, ()> {
         Box::pin(
             async move {
-                parent_names.push(self.name().to_string());
-                let group_name = parent_names.join("::");
-
                 // Setup the fixture. If it fails, we skip the tests
                 let fixture = task::setup(
-                    &group_name,
+                    self.name(),
                     Task::Group,
                     ctx.fixtures.setup::<F>(),
                     F::timeout_setup().unwrap_or(ctx.default_timeout),
@@ -96,7 +86,7 @@ where
                     Ok(None) | Err(()) => {
                         // Setup could have created other fixtures, so we need to teardown those
                         task::teardown(
-                            &group_name,
+                            self.name(),
                             ctx.fixtures.teardown(),
                             F::timeout_teardown().unwrap_or(ctx.default_timeout),
                             ctx.clone(),
@@ -106,37 +96,14 @@ where
                     }
                 };
 
-                ctx.update_concurrency_enabled(F::test_can_run_concurrently());
-
-                // Run groups
-                for group in self.groups().iter().filter(|group| {
-                    ctx.filter
-                        .consider_group(parent_names.iter().map(|v| v.as_str()), group.name())
-                }) {
-                    group.run_group(parent_names.clone(), ctx.clone()).await;
-                }
-
                 // Run concurrent tests
                 stream::iter(
                     self.tests()
                         .iter()
-                        .filter(|test| ctx.filter.consider_test(&parent_names, test.name()))
-                        .filter(|test| ctx.is_concurrency_enabled(test.can_run_concurrently())),
+                        .filter(|test| ctx.filter.consider_test(self.name(), test.name())),
                 )
                 .for_each_concurrent(Some(ctx.concurrency), |test| async {
-                    _ = test.run_test(&group_name, ctx.clone()).await;
-                })
-                .await;
-
-                // Run non-concurrent tests
-                stream::iter(
-                    self.tests()
-                        .iter()
-                        .filter(|test| ctx.filter.consider_test(&parent_names, test.name()))
-                        .filter(|test| !ctx.is_concurrency_enabled(test.can_run_concurrently())),
-                )
-                .for_each(|test| async {
-                    _ = test.run_test(&group_name, ctx.clone()).await;
+                    _ = test.run_test(ctx.clone()).await;
                 })
                 .await;
 
@@ -145,7 +112,7 @@ where
 
                 // Teardown group fixture
                 task::teardown(
-                    &group_name,
+                    self.name(),
                     ctx.fixtures.teardown(),
                     F::timeout_teardown().unwrap_or(ctx.default_timeout),
                     ctx.clone(),
@@ -160,6 +127,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RootGroup;
     use crate::filter::Filter;
     use crate::fixture::Setup;
     use crate::statistics::Event;
@@ -207,7 +175,7 @@ mod tests {
         fn run(&self, _: Arc<Self::Fixture>) -> impl Future<Output = ()> + Send + 'static {
             let name = self.0.clone();
             async move {
-                if name == "boom" {
+                if name == "crud::boom" {
                     panic!("boom");
                 }
             }
@@ -231,25 +199,41 @@ mod tests {
         }
     }
 
+    impl RootGroup for GroupImpl {
+        fn groups(&self) -> &[Box<dyn RunGroup>] {
+            &[]
+        }
+    }
+
     #[tokio::test]
     async fn collects_failed_test_names() {
-        let group = Box::new(GroupImpl {
+        let group = GroupImpl {
             name: "crud".to_string(),
             tests: vec![
-                Box::new(TestImpl("ok".to_string())),
-                Box::new(TestImpl("boom".to_string())),
+                Box::new(TestImpl("crud::ok".to_string())),
+                Box::new(TestImpl("crud::boom".to_string())),
             ],
-        }) as Box<dyn RunGroup>;
+        };
         let ctx = RunContext::new()
-            .with_filter(Filter::new(&[], group.as_ref()))
+            .with_filter(Filter::new(&[""; 0], &group))
             .with_default_timeout(Duration::from_secs(1));
 
-        ctx.statistics.record("crud::ok", Event::TestDefined);
-        ctx.statistics.record("crud::boom", Event::TestDefined);
+        ctx.statistics.record(
+            "crud::ok",
+            Event::TestDefined {
+                group: "crud".to_string(),
+            },
+        );
+        ctx.statistics.record(
+            "crud::boom",
+            Event::TestDefined {
+                group: "crud".to_string(),
+            },
+        );
         ctx.statistics.record("crud::ok", Event::TestIncluded);
         ctx.statistics.record("crud::boom", Event::TestIncluded);
 
-        group.run_group(vec![], ctx.clone()).await;
+        group.run_group(ctx.clone()).await;
 
         assert!(!ctx.statistics.is_success());
         assert_eq!(ctx.statistics.tests_included(), 2);

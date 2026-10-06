@@ -4,17 +4,15 @@
  */
 
 use crate::DEFAULT_TIMEOUT;
+use crate::RootGroup;
 use crate::backtrace;
 use crate::backtrace::Backtrace;
 use crate::filter::Filter;
 use crate::fixture::Fixtures;
-use crate::group::RunGroup;
 use crate::statistics::Event;
 use crate::statistics::Statistics;
 use async_backtrace::framed;
-use itertools::Itertools;
 use std::fmt::Debug;
-use std::iter;
 use std::time::Duration;
 use tracing::Instrument;
 use tracing::error;
@@ -29,7 +27,6 @@ pub struct RunContext {
     pub(crate) filter: Filter,
     pub(crate) default_timeout: Duration,
     pub(crate) concurrency: usize,
-    pub(crate) concurrency_enabled: bool,
 }
 
 impl RunContext {
@@ -41,7 +38,6 @@ impl RunContext {
             filter: Filter::empty(),
             default_timeout: DEFAULT_TIMEOUT,
             concurrency: 1,
-            concurrency_enabled: true,
         }
     }
 
@@ -69,14 +65,6 @@ impl RunContext {
         self.concurrency = if concurrency > 0 { concurrency } else { 1 };
         self
     }
-
-    pub(crate) fn update_concurrency_enabled(&mut self, enabled_for_next_level: bool) {
-        self.concurrency_enabled &= enabled_for_next_level;
-    }
-
-    pub(crate) fn is_concurrency_enabled(&self, enabled_for_next_level: bool) -> bool {
-        self.concurrency_enabled & enabled_for_next_level
-    }
 }
 
 impl Debug for RunContext {
@@ -89,50 +77,61 @@ impl Debug for RunContext {
 /// Runs all test cases, filtering them based on the provided filter map.
 pub(crate) async fn run(
     fixtures: Fixtures,
-    group: Box<dyn RunGroup>,
+    group: &impl RootGroup,
     filter: Filter,
     default_timeout: Duration,
     concurrency: usize,
 ) -> Statistics {
     let ctx = RunContext::new()
         .with_fixtures(fixtures)
-        .with_filter(filter)
+        .with_filter(filter.clone())
         .with_backtrace(backtrace::setup_panic_hook())
         .with_default_timeout(default_timeout)
         .with_concurrency(concurrency);
 
     let mut empty = true;
     group
-        .test_names()
-        .into_iter()
-        .inspect(|name| {
+        .group_test_names()
+        .inspect(|&(group_name, test_name)| {
             ctx.statistics.record(
-                format!("{group_name}::{name}", group_name = group.name()),
-                Event::TestDefined,
-            )
+                test_name,
+                Event::TestDefined {
+                    group: group_name.to_string(),
+                },
+            );
         })
-        .filter(|name| {
-            let parts = name.split("::").collect_vec();
-            ctx.filter.consider_test(
-                iter::once(&group.name()).chain(&parts[..parts.len() - 1]),
-                parts.last().unwrap_or(&""),
-            )
-        })
-        .for_each(|name| {
+        .filter(|(group_name, test_name)| filter.consider_test(group_name, test_name))
+        .for_each(|(_, test_name)| {
             empty = false;
-            ctx.statistics.record(
-                format!("{group_name}::{name}", group_name = group.name()),
-                Event::TestIncluded,
-            )
+            ctx.statistics.record(test_name, Event::TestIncluded);
         });
 
     if empty {
         error!("no tests to run");
     } else {
-        group
-            .run_group(vec![], ctx.clone())
-            .instrument(error_span!("group", "{}", group.name()))
-            .await;
+        // Run groups
+        for group in group
+            .groups()
+            .iter()
+            .filter(|&group| filter.consider_group(group.name()))
+            .filter(|&group| !group.is_empty())
+        {
+            group
+                .run_group(ctx.clone())
+                .instrument(error_span!("group", "{}", group.name()))
+                .await;
+        }
+
+        // Run tests
+        for test in group
+            .tests()
+            .iter()
+            .filter(|test| filter.consider_test(group.name(), test.name()))
+        {
+            test.run_test(ctx.clone())
+                .instrument(error_span!("test", "{}", test.name()))
+                .await;
+        }
     }
 
     backtrace::clear_panic_hook();

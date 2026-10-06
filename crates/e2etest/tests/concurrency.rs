@@ -23,10 +23,6 @@ impl e2etest::Fixture for Concurrently {
         Some(Self(log))
     }
     async fn teardown(self) {}
-
-    fn test_can_run_concurrently() -> bool {
-        true
-    }
 }
 
 #[derive(Clone)]
@@ -40,15 +36,7 @@ impl e2etest::Fixture for NotConcurrently {
     async fn teardown(self) {}
 }
 
-e2etest::group!(name = concurrency_root);
-
-e2etest::group!(name = concurrency_group1, parent = concurrency_root);
-
-e2etest::group!(
-    name = concurrency_group2,
-    parent = concurrency_root,
-    fixtures = (NotConcurrently)
-);
+e2etest::group!(name = concurrency_group1);
 
 #[e2etest::test(group = concurrency_group1)]
 async fn test1(fixture: Arc<Concurrently>) {
@@ -59,7 +47,7 @@ async fn test1(fixture: Arc<Concurrently>) {
 }
 
 #[e2etest::test(group = concurrency_group1)]
-async fn test2(fixture: Arc<NotConcurrently>) {
+async fn test2(fixture: Arc<Concurrently>) {
     for _ in 0..REPEATS {
         tokio::time::sleep(TIMEOUT).await;
         fixture.0.0.lock().unwrap().push("test2".to_string());
@@ -74,16 +62,16 @@ async fn test3(fixture: Arc<Concurrently>) {
     }
 }
 
-#[e2etest::test(group = concurrency_group2)]
-async fn test4(fixture: Arc<Concurrently>) {
+#[e2etest::test()]
+async fn test4(fixture: Arc<NotConcurrently>) {
     for _ in 0..REPEATS {
         tokio::time::sleep(TIMEOUT).await;
         fixture.0.0.lock().unwrap().push("test4".to_string());
     }
 }
 
-#[e2etest::test(group = concurrency_group2)]
-async fn test5(fixture: Arc<Concurrently>) {
+#[e2etest::test()]
+async fn test5(fixture: Arc<NotConcurrently>) {
     for _ in 0..REPEATS {
         tokio::time::sleep(TIMEOUT).await;
         fixture.0.0.lock().unwrap().push("test5".to_string());
@@ -99,19 +87,20 @@ async fn concurrency() {
             .with_permanent_fixture(Log(Arc::clone(&log)))
             .with_default_timeout(Duration::from_secs(1))
             .with_concurrency(10),
-        concurrency_root(),
     )
     .await;
 
     let log = log.lock().unwrap();
     let log = log.as_slice();
     assert_ne!(&log[00..10], &["test1"; 10]);
+    assert_ne!(&log[00..10], &["test2"; 10]);
     assert_ne!(&log[00..10], &["test3"; 10]);
     assert_ne!(&log[10..20], &["test1"; 10]);
+    assert_ne!(&log[10..20], &["test2"; 10]);
     assert_ne!(&log[10..20], &["test3"; 10]);
-    assert!(&log[0..20].contains(&"test1".to_string()));
-    assert!(&log[0..20].contains(&"test3".to_string()));
-    assert_eq!(&log[20..30], &["test2"; 10]);
+    assert!(&log[0..30].contains(&"test1".to_string()));
+    assert!(&log[0..30].contains(&"test2".to_string()));
+    assert!(&log[0..30].contains(&"test3".to_string()));
     assert_eq!(&log[30..40], &["test4"; 10]);
     assert_eq!(&log[40..50], &["test5"; 10]);
 

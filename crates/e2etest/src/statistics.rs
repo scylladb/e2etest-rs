@@ -3,9 +3,13 @@
  * SPDX-License-Identifier: MIT OR Apache-2.0
  */
 
+use crate::Group;
+use crate::Root;
 use itertools::Itertools;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Debug;
+use std::iter;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -19,7 +23,7 @@ pub(crate) enum Task {
     Test,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) enum Event {
     SetupLaunched,
     SetupSkipped(Task),
@@ -30,7 +34,7 @@ pub(crate) enum Event {
     TeardownPassed,
     TeardownFailed,
 
-    TestDefined,
+    TestDefined { group: String },
     TestIncluded,
     TestLaunched,
     TestPassed,
@@ -55,6 +59,8 @@ impl EventEntry {
 impl Debug for Statistics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Statistics")
+            .field("groups_defined", &self.groups_defined())
+            .field("groups_included", &self.groups_included())
             .field("tests_defined", &self.tests_defined())
             .field("tests_included", &self.tests_included())
             .field("tests_launched", &self.tests_launched())
@@ -79,6 +85,7 @@ impl Debug for Statistics {
 struct Inner {
     defined: HashSet<String>,
     included: HashSet<String>,
+    groups: HashMap<String, HashSet<String>>,
     events: Vec<EventEntry>,
 }
 
@@ -87,6 +94,7 @@ impl Inner {
         Self {
             defined: HashSet::new(),
             included: HashSet::new(),
+            groups: HashMap::new(),
             events: Vec::new(),
         }
     }
@@ -95,10 +103,13 @@ impl Inner {
     ///
     /// The `name` parameter is a full path to a test or a group.
     fn iter_included(&self, name: &str) -> impl Iterator<Item = &String> {
-        let name_with_sentinel = format!("{name}::");
-        self.included
-            .iter()
-            .filter(move |included| *included == name || included.starts_with(&name_with_sentinel))
+        iter::empty().chain(self.included.get(name)).chain(
+            self.groups
+                .get(name)
+                .into_iter()
+                .flat_map(|group_tests| group_tests.iter())
+                .filter(|&test_name| self.included.contains(test_name)),
+        )
     }
 }
 
@@ -111,7 +122,8 @@ impl Statistics {
         let name = name.into();
         let mut inner = self.0.lock().unwrap();
         match event {
-            Event::TestDefined => {
+            Event::TestDefined { group } => {
+                inner.groups.entry(group).or_default().insert(name.clone());
                 inner.defined.insert(name);
                 return;
             }
@@ -143,6 +155,32 @@ impl Statistics {
     pub fn is_success(&self) -> bool {
         let inner = self.0.lock().unwrap();
         !inner.included.is_empty() && !inner.events.iter().any(EventEntry::is_failed)
+    }
+
+    /// Returns number of total defined groups.
+    pub fn groups_defined(&self) -> usize {
+        let inner = self.0.lock().unwrap();
+        let root_group_count = if inner.groups.contains_key(Root.name()) {
+            1
+        } else {
+            0
+        };
+        inner.groups.len() - root_group_count
+    }
+
+    /// Returns number of groups included in the run after filtering.
+    pub fn groups_included(&self) -> usize {
+        let inner = self.0.lock().unwrap();
+        inner
+            .groups
+            .iter()
+            .filter_map(|(group_name, tests)| (group_name != Root.name()).then_some(tests))
+            .filter(|tests| {
+                tests
+                    .iter()
+                    .any(|test_name| inner.included.contains(test_name))
+            })
+            .count()
     }
 
     /// Returns number of total defined tests.
@@ -373,26 +411,46 @@ mod tests {
     #[test]
     fn failing() {
         let stats = Statistics::new();
-        stats.record("foo", Event::TestDefined);
+        stats.record(
+            "foo",
+            Event::TestDefined {
+                group: "root".to_string(),
+            },
+        );
         stats.record("foo", Event::TestIncluded);
         assert!(stats.is_success());
         stats.record("foo", Event::TestFailed);
         assert!(!stats.is_success());
 
         let stats = Statistics::new();
-        stats.record("foo", Event::TestDefined);
+        stats.record(
+            "foo",
+            Event::TestDefined {
+                group: "root".to_string(),
+            },
+        );
         stats.record("foo", Event::TestIncluded);
         stats.record("foo", Event::SetupFailed(Task::Test));
         assert!(!stats.is_success());
 
         let stats = Statistics::new();
-        stats.record("foo", Event::TestDefined);
+        stats.record(
+            "foo",
+            Event::TestDefined {
+                group: "root".to_string(),
+            },
+        );
         stats.record("foo", Event::TestIncluded);
         stats.record("foo", Event::SetupFailed(Task::Group));
         assert!(!stats.is_success());
 
         let stats = Statistics::new();
-        stats.record("foo", Event::TestDefined);
+        stats.record(
+            "foo",
+            Event::TestDefined {
+                group: "root".to_string(),
+            },
+        );
         stats.record("foo", Event::TestIncluded);
         stats.record("foo", Event::TeardownFailed);
         assert!(!stats.is_success());
@@ -403,24 +461,114 @@ mod tests {
         let stats = Statistics::new();
 
         // Define a hierarchy of tests and groups
-        stats.record("root1::branch1::test1", Event::TestDefined);
-        stats.record("root1::branch1::test2", Event::TestDefined);
-        stats.record("root1::branch1::test3", Event::TestDefined);
-        stats.record("root1::branch2::test1", Event::TestDefined);
-        stats.record("root1::branch2::test2", Event::TestDefined);
-        stats.record("root1::branch2::test3", Event::TestDefined);
-        stats.record("root1::test1", Event::TestDefined);
-        stats.record("root1::test2", Event::TestDefined);
-        stats.record("root1::test3", Event::TestDefined);
-        stats.record("root2::branch1::test1", Event::TestDefined);
-        stats.record("root2::branch1::test2", Event::TestDefined);
-        stats.record("root2::branch1::test3", Event::TestDefined);
-        stats.record("root2::branch2::test1", Event::TestDefined);
-        stats.record("root2::branch2::test2", Event::TestDefined);
-        stats.record("root2::branch2::test3", Event::TestDefined);
-        stats.record("root2::test1", Event::TestDefined);
-        stats.record("root2::test2", Event::TestDefined);
-        stats.record("root2::test3", Event::TestDefined);
+        stats.record(
+            "root1::branch1::test1",
+            Event::TestDefined {
+                group: "root1::branch1".to_string(),
+            },
+        );
+        stats.record(
+            "root1::branch1::test2",
+            Event::TestDefined {
+                group: "root1::branch1".to_string(),
+            },
+        );
+        stats.record(
+            "root1::branch1::test3",
+            Event::TestDefined {
+                group: "root1::branch1".to_string(),
+            },
+        );
+        stats.record(
+            "root1::branch2::test1",
+            Event::TestDefined {
+                group: "root1::branch2".to_string(),
+            },
+        );
+        stats.record(
+            "root1::branch2::test2",
+            Event::TestDefined {
+                group: "root1::branch2".to_string(),
+            },
+        );
+        stats.record(
+            "root1::branch2::test3",
+            Event::TestDefined {
+                group: "root1::branch2".to_string(),
+            },
+        );
+        stats.record(
+            "root1::test1",
+            Event::TestDefined {
+                group: "root1".to_string(),
+            },
+        );
+        stats.record(
+            "root1::test2",
+            Event::TestDefined {
+                group: "root1".to_string(),
+            },
+        );
+        stats.record(
+            "root1::test3",
+            Event::TestDefined {
+                group: "root1".to_string(),
+            },
+        );
+        stats.record(
+            "root2::branch1::test1",
+            Event::TestDefined {
+                group: "root2::branch1".to_string(),
+            },
+        );
+        stats.record(
+            "root2::branch1::test2",
+            Event::TestDefined {
+                group: "root2::branch1".to_string(),
+            },
+        );
+        stats.record(
+            "root2::branch1::test3",
+            Event::TestDefined {
+                group: "root2::branch1".to_string(),
+            },
+        );
+        stats.record(
+            "root2::branch2::test1",
+            Event::TestDefined {
+                group: "root2::branch2".to_string(),
+            },
+        );
+        stats.record(
+            "root2::branch2::test2",
+            Event::TestDefined {
+                group: "root2::branch2".to_string(),
+            },
+        );
+        stats.record(
+            "root2::branch2::test3",
+            Event::TestDefined {
+                group: "root2::branch2".to_string(),
+            },
+        );
+        stats.record(
+            "root2::test1",
+            Event::TestDefined {
+                group: "root2".to_string(),
+            },
+        );
+        stats.record(
+            "root2::test2",
+            Event::TestDefined {
+                group: "root2".to_string(),
+            },
+        );
+        stats.record(
+            "root2::test3",
+            Event::TestDefined {
+                group: "root2".to_string(),
+            },
+        );
 
         // Include some of the tests in the run (simulate filtering)
         stats.record("root1::branch1::test1", Event::TestIncluded);

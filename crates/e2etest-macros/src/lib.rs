@@ -27,10 +27,6 @@ use syn::parse::ParseStream;
 use syn::parse_macro_input;
 use syn::spanned::Spanned;
 
-fn group_groups_name(name: &str) -> String {
-    format!("_E2ETEST_{name}_GROUPS", name = ccase!(constant, name))
-}
-
 fn group_tests_name(name: &str) -> String {
     format!("_E2ETEST_{name}_TESTS", name = ccase!(constant, name))
 }
@@ -58,7 +54,6 @@ fn test_register_name(name: &str) -> String {
 struct GroupParams {
     name: Ident,
     fixtures: Vec<Ident>,
-    parent: Option<Path>,
 }
 
 impl Parse for GroupParams {
@@ -74,7 +69,6 @@ impl Parse for GroupParams {
         let name = Ident::new(&name.to_string().to_lowercase(), name.span());
 
         let mut fixtures = Vec::new();
-        let mut parent = None;
 
         while !input.is_empty() {
             let _: Token![,] = input.parse()?;
@@ -109,35 +103,27 @@ impl Parse for GroupParams {
                     })
                     .map_ok(|path_segment| path_segment.ident)
                     .collect::<syn::Result<_>>()?;
-            } else if name == "parent" {
-                let _: Token![=] = input.parse()?;
-                parent = Some(input.parse()?);
             } else {
                 return Err(syn::Error::new(
                     name.span(),
-                    "unexpected parameter, expected 'fixtures' or 'parent'",
+                    "unexpected parameter, expected 'fixtures'",
                 ));
             }
         }
-        Ok(Self {
-            name,
-            fixtures,
-            parent,
-        })
+        Ok(Self { name, fixtures })
     }
 }
 
 /// Macro for defining a test group.
 ///
 /// It generates a struct implementing `e2etest::Group` trait and registers it in the framework.
+/// All tests in the group will be run concurrently and will share the same set of group fixtures
+/// if provided.
+///
 /// The macro takes the following parameters:
 /// - `name`: the name of the group (required)
 /// - `fixtures`: a tuple of fixture types that will be set up for each test in the group
-///   (optional). The test_can_run_concurrently() method of generated fixture is a conjunction of
-///   the test_can_run_concurrently() methods of all fixtures and true.
-/// - `parent`: a path to the parent group, if this group is a subgroup (optional)
-///
-/// If you use this macro you should add `linkme` as a dependency in your crate.
+///   (optional).
 #[proc_macro]
 pub fn group(item: TokenStream) -> TokenStream {
     let params = parse_macro_input!(item as GroupParams);
@@ -151,38 +137,13 @@ fn generate_group(params: GroupParams) -> syn::Result<proc_macro2::TokenStream> 
     let name_string = name.to_string();
     let fixtures = params.fixtures;
     let group_tests = Ident::new(&group_tests_name(&name_string), name.span());
-    let group_groups = Ident::new(&group_groups_name(&name_string), name.span());
     let group_fixture = Ident::new(&group_fixture_name(&name_string), name.span());
     let group_type = Ident::new(&group_type_name(&name_string), name.span());
-    let register_group = if let Some(parent) = &params.parent {
-        let Some(last) = parent.segments.last() else {
-            return Err(syn::Error::new(
-                parent.segments.span(),
-                "Expected parent path to have at least one segment",
-            ));
-        };
-        let parent_name = last.ident.to_string();
-        let mut parent_groups = parent.clone();
-        let Some(last) = parent_groups.segments.last_mut() else {
-            return Err(syn::Error::new(
-                parent_groups.segments.span(),
-                "Expected parent path to have at least one segment",
-            ));
-        };
-        last.ident = Ident::new(&group_groups_name(&parent_name), name.span());
-        quote! {
-            #[linkme::distributed_slice(#parent_groups)]
-        }
-    } else {
-        quote! {}
-    };
 
     let expanded = quote! {
-        #[linkme::distributed_slice]
+        #[e2etest::__linkme::distributed_slice]
+        #[linkme(crate = e2etest::__linkme)]
         pub static #group_tests: [fn() -> Box<dyn e2etest::RunTest>];
-
-        #[linkme::distributed_slice]
-        pub static #group_groups: [fn() -> Box<dyn e2etest::RunGroup>];
 
         struct #group_fixture(#(std::sync::Arc<#fixtures>),*);
         impl e2etest::Fixture for #group_fixture {
@@ -190,9 +151,6 @@ fn generate_group(params: GroupParams) -> syn::Result<proc_macro2::TokenStream> 
                 Some(Self(#(setup.setup::<#fixtures>().await?),*))
             }
             async fn teardown(self) { }
-            fn test_can_run_concurrently() -> bool {
-                #(#fixtures::test_can_run_concurrently() &&)* true
-            }
         }
 
         struct #group_type;
@@ -201,7 +159,7 @@ fn generate_group(params: GroupParams) -> syn::Result<proc_macro2::TokenStream> 
             type Fixture = #group_fixture;
 
             fn name(&self) -> &str {
-                #name_string
+                concat!(module_path!(), "::", #name_string)
             }
 
             fn tests(&self) -> &[Box<dyn e2etest::RunTest>] {
@@ -213,19 +171,10 @@ fn generate_group(params: GroupParams) -> syn::Result<proc_macro2::TokenStream> 
                 });
                 TESTS.as_slice()
             }
-
-            fn groups(&self) -> &[Box<dyn e2etest::RunGroup>] {
-                use std::sync::LazyLock;
-                use e2etest::RunGroup;
-
-                static GROUPS: LazyLock<Vec<Box<dyn RunGroup>>> = LazyLock::new(|| {
-                    #group_groups.iter().map(|group_fn| group_fn()).collect()
-                });
-                GROUPS.as_slice()
-            }
         }
 
-        #register_group
+        #[e2etest::__linkme::distributed_slice(e2etest::E2ETEST_GROUPS)]
+        #[linkme(crate = e2etest::__linkme)]
         pub fn #name() -> Box<dyn e2etest::RunGroup> {
             Box::new(#group_type)
         }
@@ -235,35 +184,34 @@ fn generate_group(params: GroupParams) -> syn::Result<proc_macro2::TokenStream> 
 }
 
 struct TestParams {
-    group: Path,
+    group: Option<Path>,
     timeout: Option<Expr>,
 }
 
 impl Parse for TestParams {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        let _: Ident = input.parse().and_then(|v: Ident| {
-            let span = v.span();
-            (v == "group")
-                .then_some(v)
-                .ok_or(syn::Error::new(span, "expected 'group' token"))
-        })?;
-        let _: Token![=] = input.parse()?;
-        let group: Path = input.parse()?;
+        let mut group = None;
         let mut timeout = None;
 
         while !input.is_empty() {
-            let _: Token![,] = input.parse()?;
-
             let name: Ident = input.parse()?;
             if name == "timeout" {
                 let _: Token![=] = input.parse()?;
                 timeout = Some(input.parse()?);
+            } else if name == "group" {
+                let _: Token![=] = input.parse()?;
+                group = Some(input.parse()?);
             } else {
                 return Err(syn::Error::new(
                     name.span(),
-                    "unexpected parameter, expected 'timeout'",
+                    "unexpected parameter, expected 'group' or 'timeout'",
                 ));
             }
+
+            if input.is_empty() {
+                break;
+            }
+            let _: Token![,] = input.parse()?;
         }
 
         Ok(Self { group, timeout })
@@ -306,17 +254,17 @@ fn take_fixtures(run: &ItemFn) -> syn::Result<Vec<TypePath>> {
 /// Macro for defining a test.
 ///
 /// It generates a struct implementing `e2etest::Test` trait and registers it in the framework.
+/// If the test belongs to a group, it will be registered in the group and will share the same set
+/// of group fixtures and will be run concurrently with other tests in the group. Otherwise, it
+/// will be registered as a standalone test and will be run sequentially with other standalone
+/// tests.
+///
 /// The macro takes the following parameters:
-/// - `group`: the path to the group this test belongs to (required)
+/// - `group`: the path to the group this test belongs to (optional)
 /// - `timeout`: an expression resolved to `Duration` as the timeout for the test (optional)
 ///
 /// The test function must be async, return `()`, and take as arguments a list of `Arc<Fixture>`
 /// as a list of fixtures used inside the test.
-///
-/// The test_can_run_concurrently() method of a generated fixture is a conjunction of the
-/// test_can_run_concurrently() methods of all used fixtures and true.
-///
-/// If you use this macro you should add `linkme` and `async-backtrace` as a dependency in your crate.
 #[proc_macro_attribute]
 pub fn test(attr: TokenStream, item: TokenStream) -> TokenStream {
     let params = parse_macro_input!(attr as TestParams);
@@ -327,21 +275,32 @@ pub fn test(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 fn generate_test(params: TestParams, run: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
-    let Some(last) = params.group.segments.last() else {
-        return Err(syn::Error::new(
-            params.group.segments.span(),
-            "Expected group path to have at least one segment",
-        ));
+    let register_test = if let Some(group) = params.group {
+        let Some(last) = group.segments.last() else {
+            return Err(syn::Error::new(
+                group.segments.span(),
+                "Expected group path to have at least one segment",
+            ));
+        };
+        let group_name = last.ident.to_string();
+        let mut group_tests = group.clone();
+        let Some(last) = group_tests.segments.last_mut() else {
+            return Err(syn::Error::new(
+                group_tests.segments.span(),
+                "Expected group path to have at least one segment",
+            ));
+        };
+        last.ident = Ident::new(&group_tests_name(&group_name), last.ident.span());
+        quote! {
+            #[e2etest::__linkme::distributed_slice(#group_tests)]
+            #[linkme(crate = e2etest::__linkme)]
+        }
+    } else {
+        quote! {
+            #[e2etest::__linkme::distributed_slice(e2etest::E2ETEST_TESTS)]
+            #[linkme(crate = e2etest::__linkme)]
+        }
     };
-    let group_name = last.ident.to_string();
-    let mut group_tests = params.group.clone();
-    let Some(last) = group_tests.segments.last_mut() else {
-        return Err(syn::Error::new(
-            group_tests.segments.span(),
-            "Expected group path to have at least one segment",
-        ));
-    };
-    last.ident = Ident::new(&group_tests_name(&group_name), last.ident.span());
 
     let name = run.sig.ident.clone();
     let name_string = name.to_string();
@@ -360,6 +319,10 @@ fn generate_test(params: TestParams, run: ItemFn) -> syn::Result<proc_macro2::To
             "Expected the test function to return ()",
         ));
     }
+    let run_attrs = &run.attrs;
+    let run_vis = &run.vis;
+    let run_sig = &run.sig;
+    let run_block = &run.block;
 
     let timeout = if let Some(timeout) = &params.timeout {
         quote! {
@@ -381,9 +344,6 @@ fn generate_test(params: TestParams, run: ItemFn) -> syn::Result<proc_macro2::To
                 Some(Self(#(setup.setup::<#fixtures>().await?),*))
             }
             async fn teardown(self) { }
-            fn test_can_run_concurrently() -> bool {
-                #(#fixtures::test_can_run_concurrently() &&)* true
-            }
         }
 
         struct #test_type;
@@ -392,7 +352,7 @@ fn generate_test(params: TestParams, run: ItemFn) -> syn::Result<proc_macro2::To
             type Fixture = #test_fixture;
 
             fn name(&self) -> &str {
-                #name_string
+                concat!(module_path!(), "::", #name_string)
             }
 
             #timeout
@@ -404,13 +364,14 @@ fn generate_test(params: TestParams, run: ItemFn) -> syn::Result<proc_macro2::To
             }
         }
 
-        #[linkme::distributed_slice(#group_tests)]
+        #register_test
         fn #test_register() -> Box<dyn e2etest::RunTest> {
             Box::new(#test_type)
         }
 
-        #[async_backtrace::framed]
-        #run
+        #(#run_attrs)* #run_vis #run_sig {
+            e2etest::__async_backtrace::frame!(async move #run_block).await
+        }
     };
 
     Ok(expanded)

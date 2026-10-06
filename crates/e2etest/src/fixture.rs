@@ -55,15 +55,6 @@ pub trait Fixture: Any + Send + Sync + Sized {
         None
     }
 
-    /// Whether the dependent test can run concurrently with other tests. The concurrency is
-    /// disabled by default.
-    ///
-    /// Enabling concurrency means that the several tests can use the same fixture at the same
-    /// time with Arc<Fixture>, so the fixture must be prepared for concurrent access.
-    fn test_can_run_concurrently() -> bool {
-        false
-    }
-
     /// Set up this fixture. This will be called by the fixture manager when setting up this
     /// fixture.
     fn setup(setup: &mut impl Setup) -> impl Future<Output = Option<Self>> + Send;
@@ -85,6 +76,14 @@ impl<F: Fixture> Teardown for F {
         }
         .boxed()
     }
+}
+
+impl Fixture for () {
+    async fn setup(_setup: &mut impl Setup) -> Option<Self> {
+        Some(())
+    }
+
+    async fn teardown(self) {}
 }
 
 /// A fixture setup.
