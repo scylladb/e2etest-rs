@@ -10,20 +10,21 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Debug;
 use std::iter;
+use std::ops::AddAssign;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 /// Statistics for a test run.
 pub struct Statistics(Arc<Mutex<Inner>>);
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Task {
     Group,
     Test,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Event {
     SetupLaunched,
     SetupSkipped(Task),
@@ -39,9 +40,13 @@ pub(crate) enum Event {
     TestLaunched,
     TestPassed,
     TestFailed,
+
+    ProcessLaunched,
+    ProcessPassed,
+    ProcessFailed,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct EventEntry {
     name: String,
     event: Event,
@@ -51,7 +56,10 @@ impl EventEntry {
     fn is_failed(&self) -> bool {
         matches!(
             self.event,
-            Event::SetupFailed(_) | Event::TestFailed | Event::TeardownFailed
+            Event::SetupFailed(_)
+                | Event::TestFailed
+                | Event::TeardownFailed
+                | Event::ProcessFailed
         )
     }
 }
@@ -78,10 +86,14 @@ impl Debug for Statistics {
             .field("teardowns_launched", &self.teardowns_launched())
             .field("teardowns_passed", &self.teardowns_passed())
             .field("teardowns_failed", &self.teardowns_failed())
+            .field("processes_launched", &self.processes_launched())
+            .field("processes_passed", &self.processes_passed())
+            .field("processes_failed", &self.processes_failed())
             .finish()
     }
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Inner {
     defined: HashSet<String>,
     included: HashSet<String>,
@@ -140,6 +152,9 @@ impl Statistics {
                     inner.included.contains(&name),
                     "Test {name} was not included before being processed for event {event:?}"
                 );
+            }
+            Event::ProcessLaunched | Event::ProcessPassed | Event::ProcessFailed => {
+                // processes are not defined or included, so we don't check for them
             }
             _ => {
                 assert!(
@@ -331,6 +346,36 @@ impl Statistics {
             .count()
     }
 
+    /// Returns number of processes that were launched.
+    pub fn processes_launched(&self) -> usize {
+        let inner = self.0.lock().unwrap();
+        inner
+            .events
+            .iter()
+            .filter(|entry| matches!(entry.event, Event::ProcessLaunched))
+            .count()
+    }
+
+    /// Returns number of processes that passed successfully.
+    pub fn processes_passed(&self) -> usize {
+        let inner = self.0.lock().unwrap();
+        inner
+            .events
+            .iter()
+            .filter(|entry| matches!(entry.event, Event::ProcessPassed))
+            .count()
+    }
+
+    /// Returns number of processes that failed.
+    pub fn processes_failed(&self) -> usize {
+        let inner = self.0.lock().unwrap();
+        inner
+            .events
+            .iter()
+            .filter(|entry| matches!(entry.event, Event::ProcessFailed))
+            .count()
+    }
+
     /// Returns a list of names of passed tests.
     pub fn tests_passed_names(&self) -> Vec<String> {
         let inner = self.0.lock().unwrap();
@@ -401,6 +446,23 @@ impl Statistics {
         names.sort();
         names.dedup();
         names
+    }
+}
+
+impl AddAssign for Statistics {
+    fn add_assign(&mut self, rhs: Self) {
+        let mut inner = self.0.lock().unwrap();
+        let rhs_inner = rhs.0.lock().unwrap();
+        inner.defined.extend(rhs_inner.defined.iter().cloned());
+        inner.included.extend(rhs_inner.included.iter().cloned());
+        for (group, tests) in rhs_inner.groups.iter() {
+            inner
+                .groups
+                .entry(group.clone())
+                .or_default()
+                .extend(tests.iter().cloned());
+        }
+        inner.events.extend(rhs_inner.events.iter().cloned());
     }
 }
 
@@ -581,6 +643,9 @@ mod tests {
         stats.record("root2::branch2::test2", Event::TestIncluded);
         stats.record("root2::test3", Event::TestIncluded);
 
+        // Start executing the process root1
+        stats.record("unshare-root1", Event::ProcessLaunched);
+
         // Start executing the root1 group
         stats.record("root1", Event::SetupLaunched);
         stats.record("root1", Event::SetupPassed);
@@ -631,6 +696,12 @@ mod tests {
         stats.record("root1", Event::TeardownLaunched);
         stats.record("root1", Event::TeardownFailed);
 
+        // Finish ok the process root1
+        stats.record("unshare-root1", Event::ProcessPassed);
+
+        // Start executing the process root2
+        stats.record("unshare-root2", Event::ProcessLaunched);
+
         // Start executing the root2 group
         stats.record("root2", Event::SetupLaunched);
         stats.record("root2", Event::SetupPassed);
@@ -659,6 +730,9 @@ mod tests {
         stats.record("root2", Event::TeardownLaunched);
         stats.record("root2", Event::TeardownPassed);
 
+        // Finish failed the process root1
+        stats.record("unshare-root2", Event::ProcessFailed);
+
         assert_eq!(stats.tests_defined(), 18);
         assert_eq!(stats.tests_included(), 9);
         assert_eq!(stats.tests_launched(), 3);
@@ -675,6 +749,10 @@ mod tests {
         assert_eq!(stats.teardowns_launched(), 11);
         assert_eq!(stats.teardowns_passed(), 10);
         assert_eq!(stats.teardowns_failed(), 1);
+
+        assert_eq!(stats.processes_launched(), 2);
+        assert_eq!(stats.processes_passed(), 1);
+        assert_eq!(stats.processes_failed(), 1);
 
         assert_eq!(
             stats.tests_passed_names(),
@@ -695,7 +773,13 @@ mod tests {
         );
         assert_eq!(
             stats.failed_names(),
-            vec!["root1", "root1::test1", "root2::branch2", "root2::test3"]
+            vec![
+                "root1",
+                "root1::test1",
+                "root2::branch2",
+                "root2::test3",
+                "unshare-root2"
+            ]
         );
     }
 }

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT OR Apache-2.0
  */
 
-use e2etest::Config;
+use e2etest::ConfigUnshare;
 use e2etest::Setup;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -67,17 +67,17 @@ async fn test5(fixture: Arc<Logger>) {
     }
 }
 
-#[tokio::test]
-async fn concurrency() {
+#[test]
+fn concurrency() {
     let log = Arc::new(Mutex::new(Vec::new()));
 
-    let stats = e2etest::run(
-        Config::default()
+    let stats = e2etest::run_without_unshare(
+        ConfigUnshare::default()
             .with_permanent_fixture(Log(Arc::clone(&log)))
             .with_default_timeout(Duration::from_secs(1))
             .with_concurrency(10),
-    )
-    .await;
+        vec![],
+    );
 
     let log = log.lock().unwrap();
     let log = log.as_slice();

@@ -83,8 +83,28 @@ jobs:
     - name: Print rustc version
       run: rustc --version
 
+    - name: Disable apparmor user namespace restrictions
+      run: sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0
+
     - name: Run cargo-test-doc checks
       run: cargo test --verbose --doc --workspace
+
+  cargo-example-simple:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+    - name: Setup rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+
+    - name: Print rustc version
+      run: rustc --version
+
+    - name: Disable apparmor user namespace restrictions
+      run: sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0
+
+    - name: Run cargo-run-example-simple checks
+      run: cargo run --example simple
 
   cargo-deny:
     runs-on: ubuntu-latest
@@ -121,7 +141,7 @@ jobs:
       run: cargo machete
 
   rust-workflow-status:
-    needs: ["cargo-clippy", "cargo-fmt", "cargo-test", "cargo-deny", "cargo-machete"]
+    needs: ["cargo-clippy", "cargo-fmt", "cargo-test", "cargo-test-doc", "cargo-example-simple", "cargo-deny", "cargo-machete"]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -146,6 +166,11 @@ jobs:
 
         if [[ "${{ needs.cargo-test-doc.result }}" == "failure" ]]; then
           echo "cargo-test-doc job failed"
+          return_code=1
+        fi
+
+        if [[ "${{ needs.cargo-example-simple.result }}" == "failure" ]]; then
+          echo "cargo-example-simple job failed"
           return_code=1
         fi
 

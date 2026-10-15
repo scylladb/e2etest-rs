@@ -8,6 +8,13 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use wildmatch::WildMatch;
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Restricted {
+    None,
+    Group(String),
+    Test(String),
+}
+
 /// Represents the filter configuration for test execution.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Filter {
@@ -24,10 +31,15 @@ impl Filter {
     }
 
     /// Parse command line filters into the expected filter format for test execution.
-    pub(crate) fn new(filters: &[String], group: &impl RootGroup) -> Self {
-        if filters.is_empty() {
-            return Self::All;
-        }
+    pub(crate) fn new(restricted: &Restricted, filters: &[String], group: &impl RootGroup) -> Self {
+        let filters = if filters.is_empty() {
+            if matches!(restricted, Restricted::None) {
+                return Self::All;
+            }
+            &["*".to_string()]
+        } else {
+            filters
+        };
 
         let mut filtered_tests = BTreeSet::new();
         let mut filtered_groups = BTreeSet::new();
@@ -38,6 +50,11 @@ impl Filter {
             .for_each(|filter| {
                 group
                     .group_test_names()
+                    .filter(|(group_name, test_name)| match &restricted {
+                        Restricted::None => true,
+                        Restricted::Group(restricted_group) => group_name == restricted_group,
+                        Restricted::Test(restricted_test) => test_name == restricted_test,
+                    })
                     .filter(|(_, test_name)| filter.matches(test_name))
                     .for_each(|(group_name, test_name)| {
                         filtered_groups.insert(group_name.to_string());
@@ -201,7 +218,7 @@ mod tests {
     fn test_no_filters_runs_all() {
         let test_cases = make_test_cases();
         let filters: Vec<String> = vec![];
-        let result = Filter::new(&filters, &test_cases);
+        let result = Filter::new(&Restricted::None, &filters, &test_cases);
         assert_eq!(result, Filter::All);
     }
 
@@ -209,7 +226,7 @@ mod tests {
     fn test_empty_filters_runs_all() {
         let test_cases = make_test_cases();
         let filters: Vec<String> = vec!["*".into()];
-        let result = Filter::new(&filters, &test_cases);
+        let result = Filter::new(&Restricted::None, &filters, &test_cases);
 
         // It should contain all available test cases
 
@@ -244,7 +261,7 @@ mod tests {
     fn test_wrong_filters_runs_nothing() {
         let test_cases = make_test_cases();
         let filters: Vec<String> = vec!["bad_name".into()];
-        let result = Filter::new(&filters, &test_cases);
+        let result = Filter::new(&Restricted::None, &filters, &test_cases);
 
         assert_eq!(
             result,
@@ -259,7 +276,7 @@ mod tests {
     fn test_module_partial_match() {
         let test_cases = make_test_cases();
         let filters = vec!["*crud*".into()];
-        let result = Filter::new(&filters, &test_cases);
+        let result = Filter::new(&Restricted::None, &filters, &test_cases);
 
         assert_eq!(
             result,
@@ -279,7 +296,7 @@ mod tests {
     fn test_test_case_partial_match() {
         let test_cases = make_test_cases();
         let filters = vec!["*simple*".into()];
-        let result = Filter::new(&filters, &test_cases);
+        let result = Filter::new(&Restricted::None, &filters, &test_cases);
 
         assert_eq!(
             result,
@@ -299,7 +316,7 @@ mod tests {
     fn test_test_case_question_sign() {
         let test_cases = make_test_cases();
         let filters = vec!["*_?ndex*".into()];
-        let result = Filter::new(&filters, &test_cases);
+        let result = Filter::new(&Restricted::None, &filters, &test_cases);
 
         assert_eq!(
             result,
@@ -325,10 +342,77 @@ mod tests {
     }
 
     #[test]
+    fn test_test_case_restriction_group() {
+        let test_cases = make_test_cases();
+        let filters = vec!["*_?ndex*".into()];
+        let result = Filter::new(
+            &Restricted::Group("crud".to_string()),
+            &filters,
+            &test_cases,
+        );
+
+        assert_eq!(
+            result,
+            Filter::Some {
+                groups: Arc::new(["crud"].into_iter().map(String::from).collect()),
+                tests: Arc::new(["crud::drop_index"].into_iter().map(String::from).collect()),
+            }
+        );
+    }
+
+    #[test]
+    fn test_test_case_restriction_test() {
+        let test_cases = make_test_cases();
+        let filters = vec!["*_?ndex*".into()];
+        let result = Filter::new(
+            &Restricted::Test("full_scan::scan_undex".to_string()),
+            &filters,
+            &test_cases,
+        );
+
+        assert_eq!(
+            result,
+            Filter::Some {
+                groups: Arc::new(["full_scan"].into_iter().map(String::from).collect()),
+                tests: Arc::new(
+                    ["full_scan::scan_undex"]
+                        .into_iter()
+                        .map(String::from)
+                        .collect()
+                ),
+            }
+        );
+    }
+
+    #[test]
+    fn test_restriction_group_empty_filters() {
+        let test_cases = make_test_cases();
+        let filters = vec![];
+        let result = Filter::new(
+            &Restricted::Group("crud".to_string()),
+            &filters,
+            &test_cases,
+        );
+
+        assert_eq!(
+            result,
+            Filter::Some {
+                groups: Arc::new(["crud"].into_iter().map(String::from).collect()),
+                tests: Arc::new(
+                    ["crud::drop_index", "crud::simple_create"]
+                        .into_iter()
+                        .map(String::from)
+                        .collect()
+                ),
+            }
+        );
+    }
+
+    #[test]
     fn test_module_and_test_case_syntax() {
         let test_cases = make_test_cases();
         let filters = vec!["*crud*::*simple*".into()];
-        let result = Filter::new(&filters, &test_cases);
+        let result = Filter::new(&Restricted::None, &filters, &test_cases);
 
         assert_eq!(
             result,
@@ -348,7 +432,7 @@ mod tests {
     fn test_module_and_empty_test_case_syntax() {
         let test_cases = make_test_cases();
         let filters = vec!["*crud*::*".into()];
-        let result = Filter::new(&filters, &test_cases);
+        let result = Filter::new(&Restricted::None, &filters, &test_cases);
 
         assert_eq!(
             result,
@@ -368,7 +452,7 @@ mod tests {
     fn test_empty_module_and_test_case_syntax() {
         let test_cases = make_test_cases();
         let filters = vec!["*::*simple*".into()];
-        let result = Filter::new(&filters, &test_cases);
+        let result = Filter::new(&Restricted::None, &filters, &test_cases);
 
         assert_eq!(
             result,
@@ -388,7 +472,7 @@ mod tests {
     fn test_exact_module_match_syntax() {
         let test_cases = make_overlapping_test_cases();
         let filters = vec!["crud::*".into()];
-        let result = Filter::new(&filters, &test_cases);
+        let result = Filter::new(&Restricted::None, &filters, &test_cases);
 
         assert_eq!(
             result,
@@ -408,7 +492,7 @@ mod tests {
     fn test_exact_test_case_match_syntax() {
         let test_cases = make_overlapping_test_cases();
         let filters = vec!["*::simple_create".into()];
-        let result = Filter::new(&filters, &test_cases);
+        let result = Filter::new(&Restricted::None, &filters, &test_cases);
 
         assert_eq!(
             result,
@@ -433,7 +517,7 @@ mod tests {
     fn test_exact_module_and_test_case_syntax() {
         let test_cases = make_overlapping_test_cases();
         let filters = vec!["crud::simple_create".into()];
-        let result = Filter::new(&filters, &test_cases);
+        let result = Filter::new(&Restricted::None, &filters, &test_cases);
 
         assert_eq!(
             result,

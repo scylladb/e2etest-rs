@@ -17,7 +17,6 @@ use std::time::Duration;
 use tracing::Instrument;
 use tracing::error;
 use tracing::error_span;
-use tracing::info;
 
 #[derive(Clone)]
 pub struct RunContext {
@@ -136,11 +135,5 @@ pub(crate) async fn run(
 
     backtrace::clear_panic_hook();
 
-    let stats = ctx.statistics;
-    if stats.is_success() {
-        info!("test run ok: {stats:?}");
-    } else {
-        error!("test run failed: {stats:?}");
-    }
-    stats
+    ctx.statistics
 }
