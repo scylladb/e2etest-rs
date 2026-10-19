@@ -23,15 +23,19 @@ use hickory_server::store::in_memory::InMemoryZoneHandler;
 use hickory_server::zone_handler::AxfrPolicy;
 use hickory_server::zone_handler::Catalog;
 use hickory_server::zone_handler::ZoneType;
+use nix::mount;
+use nix::mount::MsFlags;
+use std::io::Write;
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 use std::sync::Arc;
+use tempfile::NamedTempFile;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::Instrument;
-use tracing::debug;
-use tracing::debug_span;
+use tracing::error_span;
+use tracing::info;
 
 /// Messages for the DNS actor.
 pub enum Dns {
@@ -92,6 +96,30 @@ impl DnsExt for mpsc::Sender<Dns> {
             .expect("DnsExt::upsert: internal actor should receive request");
     }
 }
+
+fn mount_resolved_conf(ip: Ipv4Addr) -> NamedTempFile {
+    let mut resolv_conf = NamedTempFile::new().expect("failed to create temporary resolv.conf");
+    resolv_conf
+        .write_all(format!("nameserver {ip}\n").as_bytes())
+        .expect("failed to write to temporary resolv.conf");
+    mount::mount(
+        Some(resolv_conf.path()),
+        "/etc/resolv.conf",
+        None::<&str>,
+        MsFlags::MS_BIND,
+        None::<&str>,
+    )
+    .expect("failed to mount temporary resolv.conf to /etc/resolv.conf");
+    resolv_conf
+}
+
+fn umount_resolved_conf(resolv_conf: NamedTempFile) {
+    mount::umount("/etc/resolv.conf").expect("failed to umount /etc/resolv.conf");
+    resolv_conf
+        .close()
+        .expect("stop: failed to close temporary resolv.conf");
+}
+
 #[framed]
 /// Starts the DNS server on the given IP address.
 pub async fn new(ip: Ipv4Addr) -> mpsc::Sender<Dns> {
@@ -105,6 +133,8 @@ pub async fn new(ip: Ipv4Addr) -> mpsc::Sender<Dns> {
         .await
         .expect("dns: failed to bind UDP socket");
 
+    let resolv_conf = mount_resolved_conf(ip);
+
     let mut catalog = Catalog::new();
     catalog.upsert(
         LowerName::from_str(ZONE).unwrap(),
@@ -115,7 +145,7 @@ pub async fn new(ip: Ipv4Addr) -> mpsc::Sender<Dns> {
 
     tokio::spawn(
         frame!(async move {
-            debug!("starting");
+            info!("starting");
 
             while let Some(msg) = rx.recv().await {
                 process(msg, &mut state).await;
@@ -126,9 +156,11 @@ pub async fn new(ip: Ipv4Addr) -> mpsc::Sender<Dns> {
                 .await
                 .expect("stop: failed to shutdown server gracefully");
 
-            debug!("stopped");
+            umount_resolved_conf(resolv_conf);
+
+            info!("stopped");
         })
-        .instrument(debug_span!("dns")),
+        .instrument(error_span!("dns")),
     );
 
     tx
