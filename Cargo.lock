@@ -525,6 +525,8 @@ version = "0.1.0"
 dependencies = [
  "async-backtrace",
  "hickory-server",
+ "nix",
+ "tempfile",
  "tokio",
  "tracing",
 ]
