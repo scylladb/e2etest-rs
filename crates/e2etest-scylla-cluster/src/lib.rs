@@ -9,20 +9,23 @@
 
 use async_backtrace::frame;
 use async_backtrace::framed;
+use e2etest_chroot::BindMount;
+use e2etest_chroot::DockerRootfs;
+use e2etest_chroot::Overlay;
+use e2etest_chroot::OverlayGuard;
+use e2etest_chroot::WithinChroot;
+use std::ffi::OsStr;
+use std::iter;
 use std::net::Ipv4Addr;
-use std::os::unix;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Output;
 use std::process::Stdio;
 use std::time::Duration;
-use sysinfo::Gid;
-use sysinfo::Uid;
-use sysinfo::Users;
-use tap::Pipe;
+use tap::Tap;
 use tempfile::TempDir;
 use tokio::fs;
-use tokio::process::Child;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -211,25 +214,30 @@ impl ScyllaClusterExt for mpsc::Sender<ScyllaCluster> {
 }
 
 /// Creates a new ScyllaDB cluster manager actor and returns a sender to send messages to it.
+///
+/// `target_name` can be either a path to the ScyllaDB executable or a Docker image name (with
+/// optional tag). If `default_conf` is provided, it will be merged with extra config provided in
+/// `ScyllaNodeConfig` when starting nodes.
 #[framed]
 pub async fn new(
-    path: PathBuf,
-    default_conf: PathBuf,
+    target_name: String,
+    default_conf: Option<PathBuf>,
     tempdir: PathBuf,
     verbose: bool,
 ) -> mpsc::Sender<ScyllaCluster> {
     let (tx, mut rx) = mpsc::channel(10);
 
-    assert!(
-        executable_exists(&path).await,
-        "scylla executable '{path:?}' does not exist"
-    );
-    assert!(
-        file_exists(&default_conf).await,
-        "scylla config '{default_conf:?}' does not exist"
-    );
+    assert!(tempdir.is_dir(), "tempdir '{tempdir:?}' is not a directory");
 
-    let mut state = State::new(path, default_conf, tempdir, verbose).await;
+    let (target, docker_export) = prepare_target(target_name, &tempdir).await;
+    if let Some(default_conf) = &default_conf {
+        assert!(
+            file_exists(default_conf).await,
+            "scylla config '{default_conf:?}' does not exist"
+        );
+    }
+
+    let mut state = State::new(target, default_conf, tempdir, verbose).await;
 
     tokio::spawn(
         frame!(async move {
@@ -242,12 +250,231 @@ pub async fn new(
             info!("Final shutting down the scylla cluster...");
             stop(&mut state).await;
 
+            if let Some(docker_export) = docker_export {
+                docker_export.stop().await;
+            }
+
             debug!("finished");
         })
         .instrument(debug_span!("db")),
     );
 
     tx
+}
+
+enum Target {
+    Binary(PathBuf),
+    ContainerRoot { rootfs: PathBuf, overlay: TempDir },
+}
+
+impl Target {
+    const CONTAINER_CERT_PATH: &'static str = "/e2etest/cert.pem";
+    const CONTAINER_KEY_PATH: &'static str = "/e2etest/key.pem";
+
+    fn cert_key<'a>(&self, node_config: &'a ScyllaNodeConfig) -> Option<(&'a Path, &'a Path)> {
+        match self {
+            Target::Binary(_) => {
+                if let (Some(cert), Some(key)) = (&node_config.cert_path, &node_config.key_path) {
+                    Some((cert, key))
+                } else {
+                    None
+                }
+            }
+            Target::ContainerRoot { .. } => {
+                if let (Some(_), Some(_)) = (&node_config.cert_path, &node_config.key_path) {
+                    Some((
+                        Path::new(Self::CONTAINER_CERT_PATH),
+                        Path::new(Self::CONTAINER_KEY_PATH),
+                    ))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+async fn prepare_target(name: String, tempdir: &Path) -> (Target, Option<DockerRootfs>) {
+    let path = PathBuf::from(&name);
+    if executable_exists(&path).await {
+        (Target::Binary(path), None)
+    } else {
+        let (name, tag) = e2etest_chroot::extract_docker_name_tag(&name);
+        let overlay = TempDir::new_in(tempdir)
+            .expect("failed to create temporary directory for container overlay");
+        let docker_rootfs = DockerRootfs::new(name, tag, tempdir).await;
+        (
+            Target::ContainerRoot {
+                rootfs: docker_rootfs.rootfs_path(),
+                overlay,
+            },
+            Some(docker_rootfs),
+        )
+    }
+}
+
+impl Target {
+    async fn scylla(
+        &self,
+        args: impl IntoIterator<Item = impl Into<String> + AsRef<OsStr>>,
+    ) -> Output {
+        let (mut cmd, _overlay) = match self {
+            Target::Binary(path) => {
+                let mut cmd = Command::new(path);
+                cmd.args(args);
+                (cmd, None)
+            }
+            Target::ContainerRoot {
+                rootfs,
+                overlay: tempdir,
+            } => {
+                let (overlay, overlay_guard) = Overlay::new(tempdir.path()).await;
+                let mut cmd = Command::new("/usr/bin/scylla");
+                cmd.args(args).within_chroot(overlay, rootfs, iter::empty());
+                (cmd, Some(overlay_guard))
+            }
+        };
+
+        cmd.kill_on_drop(true);
+
+        match cmd.output().await {
+            Ok(output) => output,
+            Err(err) => {
+                panic!(
+                    "scylla: {err}",
+                    err = e2etest_chroot::describe_command_error(err)
+                );
+            }
+        }
+    }
+
+    async fn run(
+        &self,
+        node_config: &ScyllaNodeConfig,
+        workdir: &Path,
+        confdir: &Path,
+        conffile: &Path,
+        seeds: &str,
+        verbose: bool,
+    ) -> Child {
+        let db_ip = node_config.db_ip;
+        let mut args = vec![
+            "--listen-address".to_string(),
+            db_ip.to_string(),
+            "--rpc-address".to_string(),
+            db_ip.to_string(),
+            "--api-address".to_string(),
+            db_ip.to_string(),
+            "--log-to-stdout".to_string(),
+            "true".to_string(),
+            "--logger-ostream-type".to_string(),
+            "stdout".to_string(),
+            "--endpoint-snitch".to_string(),
+            "GossipingPropertyFileSnitch".to_string(),
+        ]
+        .tap_mut(|args| {
+            if !node_config.primary_vs_uris.is_empty() {
+                args.extend([
+                    "--vector-store-primary-uri".to_string(),
+                    node_config.primary_vs_uris.join(","),
+                ]);
+            }
+        })
+        .tap_mut(|args| {
+            if !node_config.secondary_vs_uris.is_empty() {
+                args.extend([
+                    "--vector-store-secondary-uri".to_string(),
+                    node_config.secondary_vs_uris.join(","),
+                ]);
+            }
+        })
+        .tap_mut(|args| {
+            if !seeds.is_empty() {
+                args.extend([
+                    "--seed-provider-parameters".to_string(),
+                    format!("seeds={seeds}"),
+                ]);
+            }
+        })
+        .tap_mut(|args| {
+            args.extend(node_config.args.clone());
+        });
+
+        let (mut cmd, overlay) = match self {
+            Target::Binary(path) => {
+                args.extend([
+                    "--options-file".to_string(),
+                    conffile.to_string_lossy().to_string(),
+                    "--workdir".to_string(),
+                    workdir.to_string_lossy().to_string(),
+                ]);
+
+                let mut cmd = Command::new(path);
+                cmd.env("SCYLLA_CONF", confdir);
+                (cmd, None)
+            }
+
+            Target::ContainerRoot {
+                rootfs,
+                overlay: tempdir,
+            } => {
+                let (overlay, overlay_guard) = Overlay::new(tempdir.path()).await;
+                let mut mounts = vec![
+                    BindMount::new(workdir, Path::new("/e2etest/workdir")),
+                    BindMount::new(confdir, Path::new("/e2etest/confdir")),
+                    BindMount::new(conffile, Path::new("/e2etest/conffile")),
+                ];
+                args.extend([
+                    "--options-file".to_string(),
+                    "/e2etest/conffile".to_string(),
+                    "--workdir".to_string(),
+                    "/e2etest/workdir".to_string(),
+                ]);
+                if let Some((container_cert, container_key)) = self.cert_key(node_config)
+                    && let (Some(cert), Some(key)) = (&node_config.cert_path, &node_config.key_path)
+                {
+                    mounts.extend([
+                        BindMount::new(cert.as_path(), container_cert),
+                        BindMount::new(key.as_path(), container_key),
+                    ]);
+                }
+
+                let mut cmd = Command::new("/usr/bin/scylla");
+                cmd.within_chroot(overlay, rootfs, mounts);
+                cmd.env("SCYLLA_CONF", "/e2etest/confdir");
+                (cmd, Some(overlay_guard))
+            }
+        };
+        if !verbose {
+            cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+        let child = cmd
+            .args(args)
+            .kill_on_drop(true)
+            .spawn()
+            .expect("start: failed to spawn scylladb");
+        Child {
+            child,
+            _overlay: overlay,
+        }
+    }
+}
+
+struct Child {
+    child: tokio::process::Child,
+    _overlay: Option<OverlayGuard>,
+}
+
+impl Child {
+    async fn kill(mut self) {
+        self.child
+            .start_kill()
+            .expect("kill: failed to send SIGKILL to scylladb process");
+        self.child
+            .wait()
+            .await
+            .expect("kill: failed to wait for scylladb process to exit");
+    }
 }
 
 struct NodeState {
@@ -257,8 +484,8 @@ struct NodeState {
 }
 
 struct State {
-    path: PathBuf,
-    default_conf: PathBuf,
+    target: Target,
+    default_conf: Option<PathBuf>,
     tempdir: PathBuf,
     nodes: Vec<NodeState>,
     version: String,
@@ -267,20 +494,18 @@ struct State {
 
 impl State {
     #[framed]
-    async fn new(path: PathBuf, default_conf: PathBuf, tempdir: PathBuf, verbose: bool) -> Self {
-        let version = String::from_utf8_lossy(
-            &Command::new(&path)
-                .arg("--version")
-                .output()
-                .await
-                .expect("db: State::new: failed to execute scylla")
-                .stdout,
-        )
-        .trim()
-        .to_string();
+    async fn new(
+        target: Target,
+        default_conf: Option<PathBuf>,
+        tempdir: PathBuf,
+        verbose: bool,
+    ) -> Self {
+        let version = String::from_utf8_lossy(&target.scylla(["--version"]).await.stdout)
+            .trim()
+            .to_string();
 
         Self {
-            path,
+            target,
             default_conf,
             version,
             tempdir,
@@ -349,38 +574,42 @@ async fn run_node(
     rack: &str,
     state: &State,
 ) -> Child {
-    let has_tls = node_config.cert_path.is_some() && node_config.key_path.is_some();
-    let has_extra = node_config.extra_config.is_some();
+    let cert_key = state.target.cert_key(node_config);
 
-    let conf = if has_tls || has_extra {
-        let mut config = Vec::new();
-        if let (Some(cert), Some(key)) = (&node_config.cert_path, &node_config.key_path) {
-            config.extend_from_slice(
-                format!(
-                    r#"client_encryption_options:
+    let mut config = if let Some(default_conf) = &state.default_conf {
+        fs::read(default_conf)
+            .await
+            .expect("start: failed to read default scylla config")
+    } else {
+        Vec::new()
+    };
+    if let Some((cert, key)) = cert_key {
+        if !config.is_empty() {
+            config.push(b'\n');
+        }
+        config.extend_from_slice(
+            format!(
+                r#"client_encryption_options:
   enabled: true
   certificate: {cert}
   keyfile: {key}"#,
-                    cert = cert.display(),
-                    key = key.display()
-                )
-                .as_bytes(),
-            );
+                cert = cert.display(),
+                key = key.display()
+            )
+            .as_bytes(),
+        );
+    }
+    if let Some(extra) = &node_config.extra_config {
+        if !config.is_empty() {
+            config.push(b'\n');
         }
-        if let Some(extra) = &node_config.extra_config {
-            if !config.is_empty() {
-                config.push(b'\n');
-            }
-            config.extend_from_slice(extra);
-        }
-        let conf_path = path.join("scylla.conf");
-        fs::write(&conf_path, config)
-            .await
-            .expect("start: failed to write scylla config");
-        conf_path
-    } else {
-        state.default_conf.clone()
-    };
+        config.extend_from_slice(extra);
+    }
+    config.push(b'\n');
+    let conf = path.join("scylla.conf");
+    fs::write(&conf, config)
+        .await
+        .expect("start: failed to write scylla config");
 
     let conf_dir = path.join("conf");
     fs::create_dir_all(&conf_dir)
@@ -398,56 +627,10 @@ async fn run_node(
         .await
         .expect("start: failed to write cassandra-rackdc.properties");
 
-    let mut cmd = Command::new(&state.path);
-    if !state.verbose {
-        cmd.stdout(Stdio::null()).stderr(Stdio::null());
-    }
-
-    cmd.env("SCYLLA_CONF", &conf_dir);
-
-    if !seeds.is_empty() {
-        cmd.arg("--seed-provider-parameters")
-            .arg(format!("seeds={seeds}"));
-    }
-
-    if !node_config.primary_vs_uris.is_empty() {
-        cmd.arg("--vector-store-primary-uri")
-            .arg(node_config.primary_vs_uris.join(","));
-    }
-
-    if !node_config.secondary_vs_uris.is_empty() {
-        cmd.arg("--vector-store-secondary-uri")
-            .arg(node_config.secondary_vs_uris.join(","));
-    }
-
-    let db_ip = node_config.db_ip;
-
-    cmd.arg("--options-file")
-        .arg(&conf)
-        .arg("--workdir")
-        .arg(path)
-        .arg("--listen-address")
-        .arg(db_ip.to_string())
-        .arg("--rpc-address")
-        .arg(db_ip.to_string())
-        .arg("--api-address")
-        .arg(db_ip.to_string())
-        .arg("--log-to-stdout")
-        .arg("true")
-        .arg("--logger-ostream-type")
-        .arg("stdout")
-        .arg("--endpoint-snitch")
-        .arg("GossipingPropertyFileSnitch")
-        .args(node_config.args.clone())
-        .pipe(|cmd| {
-            if let Some((uid, gid)) = get_scylla_user() {
-                info!("Starting ScyllaDB process as user 'scylla' ({uid:?}, {gid:?})");
-                cmd.uid(*uid).gid(*gid);
-            }
-            cmd
-        })
-        .spawn()
-        .expect("start: failed to spawn scylladb")
+    state
+        .target
+        .run(node_config, path, &conf_dir, &conf, seeds, state.verbose)
+        .await
 }
 
 #[framed]
@@ -466,11 +649,6 @@ async fn start(node_configs: Vec<ScyllaNodeConfig>, state: &mut State) {
     for (i, node_config) in node_configs.iter().enumerate() {
         let workdir = TempDir::new_in(&state.tempdir)
             .expect("start: failed to create temporary directory for scylladb");
-        if let Some((uid, gid)) = get_scylla_user() {
-            info!("Change owner of a ScyllaDB workdir to the 'scylla' user ({uid:?}, {gid:?})");
-            unix::fs::chown(workdir.path(), Some(*uid), Some(*gid))
-                .expect("start: failed to change ownership of scylladb workdir");
-        }
         let rack = format!("rack{}", i + 1);
         let seeds = seed_ip.to_string();
 
@@ -502,14 +680,8 @@ async fn start(node_configs: Vec<ScyllaNodeConfig>, state: &mut State) {
 #[framed]
 async fn stop(state: &mut State) {
     for node in &mut state.nodes {
-        if let Some(mut child) = node.child.take() {
-            child
-                .start_kill()
-                .expect("stop: failed to send SIGTERM to scylladb process");
-            child
-                .wait()
-                .await
-                .expect("stop: failed to wait for scylladb process to exit");
+        if let Some(child) = node.child.take() {
+            child.kill().await;
         }
         node.workdir = None;
     }
@@ -519,14 +691,8 @@ async fn stop(state: &mut State) {
 #[framed]
 async fn down(state: &mut State) {
     for node in &mut state.nodes {
-        if let Some(mut child) = node.child.take() {
-            child
-                .start_kill()
-                .expect("down: failed to send SIGTERM to scylladb process");
-            child
-                .wait()
-                .await
-                .expect("down: failed to wait for scylladb process to exit");
+        if let Some(child) = node.child.take() {
+            child.kill().await;
         }
     }
 }
@@ -534,31 +700,20 @@ async fn down(state: &mut State) {
 #[framed]
 async fn down_node(state: &mut State, db_ip: Ipv4Addr) {
     if let Some(node) = state.nodes.iter_mut().find(|n| n.db_ip == db_ip)
-        && let Some(mut child) = node.child.take()
+        && let Some(child) = node.child.take()
     {
-        child
-            .start_kill()
-            .expect("down_node: failed to send SIGTERM to scylladb process");
-        child
-            .wait()
-            .await
-            .expect("down_node: failed to wait for scylladb process to exit");
+        child.kill().await;
     }
 }
 
 #[framed]
 async fn wait_for_node(state: &State, ip: Ipv4Addr) -> bool {
-    let mut cmd = Command::new(&state.path);
-    cmd.arg("nodetool")
-        .arg("-h")
-        .arg(ip.to_string())
-        .arg("status");
-
     loop {
         if String::from_utf8_lossy(
-            &cmd.output()
+            &state
+                .target
+                .scylla(["nodetool", "-h", &ip.to_string(), "status"])
                 .await
-                .expect("start: failed to run nodetool")
                 .stdout,
         )
         .lines()
@@ -666,16 +821,10 @@ async fn up_node(node_config: ScyllaNodeConfig, state: &mut State) {
 async fn flush(state: &State) {
     for node in &state.nodes {
         info!("Flushing node {}", node.db_ip);
-        let mut cmd = Command::new(&state.path);
-        cmd.arg("nodetool")
-            .arg("-h")
-            .arg(node.db_ip.to_string())
-            .arg("flush");
-
-        let output = cmd
-            .output()
-            .await
-            .expect("flush: failed to run nodetool flush");
+        let output = state
+            .target
+            .scylla(["nodetool", "-h", &node.db_ip.to_string(), "flush"])
+            .await;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -684,14 +833,6 @@ async fn flush(state: &State) {
             info!("Flush completed on node {}", node.db_ip);
         }
     }
-}
-
-fn get_scylla_user() -> Option<(Uid, Gid)> {
-    Users::new_with_refreshed_list()
-        .list()
-        .iter()
-        .find(|u| u.name() == "scylla")
-        .map(|user| (user.id().clone(), user.group_id()))
 }
 
 /// Checks if the file exists and is executable.
