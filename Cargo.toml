@@ -23,7 +23,7 @@ ipc-channel = "0.23.0"
 itertools = "0.15.0"
 linkme = "0.3.37"
 neli = { version = "0.7.4", default-features = false, features = ["sync", "async"] }
-nix = { version = "0.31.3", features = ["hostname", "mount", "net", "process", "sched", "user"] }
+nix = { version = "0.31.3", features = ["hostname", "mount", "net", "process", "sched", "user", "fs"] }
 num-bigint = "0.5.1"
 proc-macro2 = "1.0.107"
 quote = "1.0.47"
@@ -38,6 +38,7 @@ syn = { version = "3.0.9", features = ["full"] }
 sysinfo = "0.39.6"
 tap = "1.0.1"
 tempfile = "3.27.0"
+testcontainers = "0.28.0"
 tokio = { version = "1.53.3", features = ["full"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
