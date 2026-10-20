@@ -35,7 +35,6 @@ scylla-proxy = "0.0.8"
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = "1.0.154"
 syn = { version = "3.0.9", features = ["full"] }
-sysinfo = "0.39.6"
 tap = "1.0.1"
 tempfile = "3.27.0"
 testcontainers = "0.28.0"
