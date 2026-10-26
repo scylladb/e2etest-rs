@@ -520,6 +520,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "e2etest-chroot"
+version = "0.1.0"
+
+[[package]]
 name = "e2etest-dns"
 version = "0.1.0"
 dependencies = [
