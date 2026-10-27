@@ -735,7 +735,11 @@ name = "e2etest-chroot"
 version = "0.1.0"
 dependencies = [
  "nix",
+ "tap",
+ "tempfile",
  "testcontainers",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
