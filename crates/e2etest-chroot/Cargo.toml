@@ -12,4 +12,8 @@ license.workspace = true
 
 [dependencies]
 nix.workspace = true
+tap.workspace = true
+tempfile.workspace = true
 testcontainers.workspace = true
+tokio.workspace = true
+tracing.workspace = true
