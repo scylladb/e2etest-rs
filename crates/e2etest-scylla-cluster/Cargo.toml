@@ -17,3 +17,13 @@ tap.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+bcrypt.workspace = true
+e2etest.workspace = true
+e2etest-dns.workspace = true
+e2etest-tls.workspace = true
+rustls.workspace = true
+scylla.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
