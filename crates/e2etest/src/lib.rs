@@ -362,14 +362,14 @@ trait RootGroup: Group {
 
     /// Returns an iterator over the (group_name, test_name) for every defined test.
     fn group_test_names(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.tests()
+        self.groups()
             .iter()
-            .map(|test| ("", test.name()))
-            .chain(self.groups().iter().flat_map(|group| {
+            .flat_map(|group| {
                 group
                     .test_names()
                     .map(|test_name| (group.name(), test_name))
-            }))
+            })
+            .chain(self.tests().iter().map(|test| ("", test.name())))
     }
 }
 
