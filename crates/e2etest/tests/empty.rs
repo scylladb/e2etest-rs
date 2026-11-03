@@ -3,13 +3,13 @@
  * SPDX-License-Identifier: MIT OR Apache-2.0
  */
 
-use e2etest::Config;
+use e2etest::ConfigWithoutUnshare;
 
 e2etest::group!(name = empty_group);
 
-#[tokio::test]
-async fn empty() {
-    let stats = e2etest::run(Config::default()).await;
+#[test]
+fn empty() {
+    let stats = e2etest::run_without_unshare(ConfigWithoutUnshare::default());
 
     assert!(!stats.is_success());
     assert_eq!(stats.tests_defined(), 0);
