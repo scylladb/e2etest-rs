@@ -3,7 +3,7 @@
 
 [package]
 name = "e2etest-scylla-cluster"
-version = "0.1.1"
+version = "0.2.0"
 description = "Scylla cluster manager for e2etest"
 repository = "https://github.com/scylladb/e2etest-rs"
 readme = "README.md"

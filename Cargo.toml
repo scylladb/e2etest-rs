@@ -16,10 +16,10 @@ async-backtrace = "0.2.7"
 axum = "0.8.9"
 bcrypt = "0.19.3"
 convert_case = "0.12.0"
-e2etest = { path = "crates/e2etest", version = "0.3.1" }
+e2etest = { path = "crates/e2etest", version = "0.4.0" }
 e2etest-chroot = { path = "crates/e2etest-chroot", version = "0.1.0" }
-e2etest-dns = { path = "crates/e2etest-dns", version = "0.1.0" }
-e2etest-macros = { path = "crates/e2etest-macros", version = "0.2.0" }
+e2etest-dns = { path = "crates/e2etest-dns", version = "0.2.0" }
+e2etest-macros = { path = "crates/e2etest-macros", version = "0.3.0" }
 e2etest-tls = { path = "crates/e2etest-tls", version = "0.1.0" }
 futures = "0.3.34"
 hickory-server = "0.26.3"

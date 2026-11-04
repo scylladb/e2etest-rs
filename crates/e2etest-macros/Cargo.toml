@@ -3,7 +3,7 @@
 
 [package]
 name = "e2etest-macros"
-version = "0.2.0"
+version = "0.3.0"
 description = "Macros for e2etest"
 repository = "https://github.com/scylladb/e2etest-rs"
 readme = "README.md"
