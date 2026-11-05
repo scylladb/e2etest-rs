@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT OR Apache-2.0
  */
 
-use e2etest::Config;
+use e2etest::ConfigWithoutUnshare;
 use e2etest::Setup;
 use e2etest::Skip;
 use std::sync::Arc;
@@ -46,16 +46,15 @@ async fn in_skipped_group(fixture: Arc<Fixture>) {
     fixture.0.0.fetch_add(1, Ordering::Relaxed);
 }
 
-#[tokio::test]
-async fn skip() {
+#[test]
+fn skip() {
     let counter = Arc::new(AtomicUsize::new(0));
 
-    let stats = e2etest::run(
-        Config::default()
+    let stats = e2etest::run_without_unshare(
+        ConfigWithoutUnshare::default()
             .with_permanent_fixture(Counter(Arc::clone(&counter)))
             .with_default_timeout(Duration::from_secs(1)),
-    )
-    .await;
+    );
 
     // 4 tests - 2 test-skipped
     assert_eq!(counter.load(Ordering::Relaxed), 2);
