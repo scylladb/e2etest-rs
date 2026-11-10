@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: MIT OR Apache-2.0
  */
 
+mod common;
+
 use e2etest::ConfigWithoutUnshare;
 use e2etest::Setup;
 use e2etest::Skip;
@@ -48,6 +50,8 @@ async fn in_skipped_group(fixture: Arc<Fixture>) {
 
 #[test]
 fn skip() {
+    common::enable_tracing();
+
     let counter = Arc::new(AtomicUsize::new(0));
 
     let stats = e2etest::run_without_unshare(
