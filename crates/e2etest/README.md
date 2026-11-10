@@ -103,8 +103,14 @@ async fn number_and_octet(two: Arc<FixtureTwo>, three: Arc<FixtureThree>) {
 
 use std::net::Ipv4Addr;
 use std::time::Duration;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt;
+use tracing_subscriber::prelude::*;
 
-tracing_subscriber::fmt::init();
+tracing_subscriber::registry()
+    .with(EnvFilter::try_new("info").unwrap())
+    .with(fmt::layer().with_target(false))
+    .init();
 
 if let Some(unshare_info) = e2etest::unshare_info() {
     let config = e2etest::ConfigInUnshare::new(unshare_info)

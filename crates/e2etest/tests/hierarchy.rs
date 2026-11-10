@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: MIT OR Apache-2.0
  */
 
+mod common;
+
 use e2etest::ConfigWithoutUnshare;
 use e2etest::Fixture;
 use e2etest::Setup;
@@ -125,6 +127,8 @@ mod second {
 
 #[test]
 fn hierarchy_names() {
+    common::enable_tracing();
+
     assert_eq!(
         &e2etest::group_names(),
         &[
@@ -148,6 +152,8 @@ fn hierarchy_names() {
 
 #[test]
 fn hierarchy_run() {
+    common::enable_tracing();
+
     let counter = Arc::new(AtomicUsize::new(0));
 
     let stats = e2etest::run_without_unshare(

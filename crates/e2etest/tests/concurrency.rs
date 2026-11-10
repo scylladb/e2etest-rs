@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: MIT OR Apache-2.0
  */
 
+mod common;
+
 use e2etest::ConfigWithoutUnshare;
 use e2etest::Setup;
 use std::sync::Arc;
@@ -69,6 +71,8 @@ async fn test5(fixture: Arc<Logger>) {
 
 #[test]
 fn concurrency() {
+    common::enable_tracing();
+
     let log = Arc::new(Mutex::new(Vec::new()));
 
     let stats = e2etest::run_without_unshare(
