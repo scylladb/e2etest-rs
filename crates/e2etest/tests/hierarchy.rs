@@ -3,7 +3,9 @@
  * SPDX-License-Identifier: MIT OR Apache-2.0
  */
 
-use e2etest::Config;
+mod common;
+
+use e2etest::ConfigWithoutUnshare;
 use e2etest::Fixture;
 use e2etest::Setup;
 use std::sync::Arc;
@@ -125,6 +127,8 @@ mod second {
 
 #[test]
 fn hierarchy_names() {
+    common::enable_tracing();
+
     assert_eq!(
         &e2etest::group_names(),
         &[
@@ -146,16 +150,17 @@ fn hierarchy_names() {
     );
 }
 
-#[tokio::test]
-async fn hierarchy_run() {
+#[test]
+fn hierarchy_run() {
+    common::enable_tracing();
+
     let counter = Arc::new(AtomicUsize::new(0));
 
-    let stats = e2etest::run(
-        Config::default()
+    let stats = e2etest::run_without_unshare(
+        ConfigWithoutUnshare::default()
             .with_permanent_fixture(Counter(Arc::clone(&counter)))
             .with_default_timeout(Duration::from_secs(1)),
-    )
-    .await;
+    );
 
     // 4 tests * 2 fixtures * 2 + 2 tests * 1 fixture * 2 + 6 tests + 3 groups * 2
     assert_eq!(counter.load(Ordering::Relaxed), 32);

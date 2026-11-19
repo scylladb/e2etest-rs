@@ -100,7 +100,7 @@ where
                         .iter()
                         .filter(|test| ctx.filter.consider_test(test.name())),
                 )
-                .for_each_concurrent(Some(ctx.concurrency), |test| async {
+                .for_each_concurrent(Some(ctx.concurrency.get()), |test| async {
                     _ = test.run_test(ctx.clone()).await;
                 })
                 .await;
@@ -125,6 +125,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Restricted;
     use crate::RootGroup;
     use crate::filter::Filter;
     use crate::fixture::Setup;
@@ -213,7 +214,7 @@ mod tests {
             ],
         };
         let ctx = RunContext::new()
-            .with_filter(Filter::new(&[], &group))
+            .with_filter(Filter::new(&Restricted::None, &[], &group))
             .with_default_timeout(Duration::from_secs(1));
 
         ctx.statistics.record(

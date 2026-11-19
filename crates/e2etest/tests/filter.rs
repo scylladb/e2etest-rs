@@ -3,7 +3,9 @@
  * SPDX-License-Identifier: MIT OR Apache-2.0
  */
 
-use e2etest::Config;
+mod common;
+
+use e2etest::ConfigWithoutUnshare;
 use e2etest::Fixture;
 use e2etest::Setup;
 use std::sync::Arc;
@@ -62,17 +64,18 @@ async fn filter_test2_2(fixture: Arc<FixtureCount>) {
     fixture.0.0.fetch_add(1, Ordering::Relaxed);
 }
 
-#[tokio::test]
-async fn filter_by_module() {
+#[test]
+fn filter_by_module() {
+    common::enable_tracing();
+
     let counter = Arc::new(AtomicUsize::new(0));
 
-    let stats = e2etest::run(
-        Config::default()
+    let stats = e2etest::run_without_unshare(
+        ConfigWithoutUnshare::default()
             .with_permanent_fixture(Counter(Arc::clone(&counter)))
-            .with_filter("*group1*::*")
-            .with_default_timeout(Duration::from_secs(1)),
-    )
-    .await;
+            .with_default_timeout(Duration::from_secs(1))
+            .with_filter("*group1*::*".to_string()),
+    );
 
     // 2 tests
     assert_eq!(counter.load(Ordering::Relaxed), 2);
@@ -86,17 +89,18 @@ async fn filter_by_module() {
     assert_eq!(stats.tests_passed(), 2);
 }
 
-#[tokio::test]
-async fn filter_by_test() {
+#[test]
+fn filter_by_test() {
+    common::enable_tracing();
+
     let counter = Arc::new(AtomicUsize::new(0));
 
-    let stats = e2etest::run(
-        Config::default()
+    let stats = e2etest::run_without_unshare(
+        ConfigWithoutUnshare::default()
             .with_permanent_fixture(Counter(Arc::clone(&counter)))
-            .with_filter("*::*test2_*")
-            .with_default_timeout(Duration::from_secs(1)),
-    )
-    .await;
+            .with_default_timeout(Duration::from_secs(1))
+            .with_filter("*::*test2_*".to_string()),
+    );
 
     // 2 tests
     assert_eq!(counter.load(Ordering::Relaxed), 2);
@@ -110,6 +114,8 @@ async fn filter_by_test() {
 
 #[test]
 fn test_and_group_names() {
+    common::enable_tracing();
+
     assert_eq!(
         e2etest::group_names(),
         ["filter::filter_group1", "filter::filter_group2"]

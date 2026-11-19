@@ -13,11 +13,11 @@ use crate::statistics::Event;
 use crate::statistics::Statistics;
 use async_backtrace::framed;
 use std::fmt::Debug;
+use std::num::NonZeroUsize;
 use std::time::Duration;
 use tracing::Instrument;
 use tracing::error;
 use tracing::error_span;
-use tracing::info;
 
 #[derive(Clone)]
 pub struct RunContext {
@@ -26,7 +26,7 @@ pub struct RunContext {
     pub(crate) backtrace: Backtrace,
     pub(crate) filter: Filter,
     pub(crate) default_timeout: Duration,
-    pub(crate) concurrency: usize,
+    pub(crate) concurrency: NonZeroUsize,
 }
 
 impl RunContext {
@@ -37,7 +37,7 @@ impl RunContext {
             backtrace: Backtrace::new(),
             filter: Filter::empty(),
             default_timeout: DEFAULT_TIMEOUT,
-            concurrency: 1,
+            concurrency: NonZeroUsize::new(1).unwrap(),
         }
     }
 
@@ -61,8 +61,8 @@ impl RunContext {
         self
     }
 
-    pub(crate) fn with_concurrency(mut self, concurrency: usize) -> Self {
-        self.concurrency = if concurrency > 0 { concurrency } else { 1 };
+    pub(crate) fn with_concurrency(mut self, concurrency: NonZeroUsize) -> Self {
+        self.concurrency = concurrency;
         self
     }
 }
@@ -80,7 +80,7 @@ pub(crate) async fn run(
     group: &impl RootGroup,
     filter: Filter,
     default_timeout: Duration,
-    concurrency: usize,
+    concurrency: NonZeroUsize,
 ) -> Statistics {
     let ctx = RunContext::new()
         .with_fixtures(fixtures)
@@ -136,11 +136,5 @@ pub(crate) async fn run(
 
     backtrace::clear_panic_hook();
 
-    let stats = ctx.statistics;
-    if stats.is_success() {
-        info!("test run ok: {stats:?}");
-    } else {
-        error!("test run failed: {stats:?}");
-    }
-    stats
+    ctx.statistics
 }

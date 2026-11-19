@@ -3,7 +3,9 @@
  * SPDX-License-Identifier: MIT OR Apache-2.0
  */
 
-use e2etest::Config;
+mod common;
+
+use e2etest::ConfigWithoutUnshare;
 use e2etest::Setup;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
@@ -41,16 +43,17 @@ async fn timeouted(fixture: Arc<Fixture>) {
     fixture.0.0.fetch_add(1, Ordering::Relaxed);
 }
 
-#[tokio::test]
-async fn timeout() {
+#[test]
+fn timeout() {
+    common::enable_tracing();
+
     let counter = Arc::new(AtomicUsize::new(0));
 
-    let stats = e2etest::run(
-        Config::default()
+    let stats = e2etest::run_without_unshare(
+        ConfigWithoutUnshare::default()
             .with_permanent_fixture(Counter(Arc::clone(&counter)))
             .with_default_timeout(Duration::from_secs(10)),
-    )
-    .await;
+    );
 
     // 3 tests - 1 timeout-test
     assert_eq!(counter.load(Ordering::Relaxed), 2);
